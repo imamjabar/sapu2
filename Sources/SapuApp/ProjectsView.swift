@@ -11,22 +11,21 @@ struct ProjectsView: View {
         let q = model.search.lowercased()
         let projects = all.filter { (filter == nil || $0.status == filter) && (q.isEmpty || $0.name.lowercased().contains(q) || $0.path.lowercased().contains(q)) }
         VStack(spacing: 0) {
+            PaneHeader(pane: .projects,
+                       subtitle: "Active = edited in the last \(model.activeDays) days. Their build folders are locked so you keep developing fast.",
+                       value: all.isEmpty ? nil : "\(all.filter { $0.status == .active }.count) active",
+                       caption: all.isEmpty ? nil : "of \(all.count) projects")
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Projects").font(.title2.weight(.semibold))
-                    Text("Active = edited in the last \(model.activeDays) days. Their build folders are locked so you keep developing fast.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                Spacer()
                 Picker("", selection: $filter) {
                     Text("All \(all.count)").tag(ProjectStatus?.none)
                     ForEach([ProjectStatus.active, .recent, .stale], id: \.self) { s in
                         Text("\(s.label) \(all.filter { $0.status == s }.count)").tag(ProjectStatus?.some(s))
                     }
                 }
-                .pickerStyle(.segmented).frame(width: 330)
+                .pickerStyle(.segmented).labelsHidden().frame(width: 360)
+                Spacer()
             }
-            .padding(16)
+            .padding(.horizontal, 22).padding(.vertical, 10)
             Divider()
             if all.isEmpty {
                 EmptyState(symbol: "folder", title: "No projects yet", message: "Scan projects to find every repo, its build folders, git state and runtime versions.",

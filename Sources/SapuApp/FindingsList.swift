@@ -10,7 +10,6 @@ struct FindingsList: View {
         let maxBytes = items.first?.bytes ?? 1
         VStack(spacing: 0) {
             header(items)
-            Divider()
             if items.isEmpty {
                 empty
             } else {
@@ -20,7 +19,8 @@ struct FindingsList: View {
                             ForEach(group.1) { f in FindingRow(finding: f, maxBytes: maxBytes).tag(f.id) }
                         } header: {
                             HStack {
-                                Label(group.0.rawValue, systemImage: group.0.symbol)
+                                Label(group.0.rawValue, systemImage: group.0.symbol).foregroundStyle(section.tint)
+                                    .font(.callout.weight(.semibold))
                                 Spacer()
                                 Text(Format.bytes(group.1.reduce(0) { $0 + $1.bytes })).monospacedDigit()
                             }
@@ -40,34 +40,15 @@ struct FindingsList: View {
     private func header(_ items: [Finding]) -> some View {
         let total = items.reduce(0) { $0 + $1.bytes }
         let safe = items.filter { $0.safety == .safe && model.isSelectable($0) }
-        return HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(section.rawValue).font(.title2.weight(.semibold))
-                Text(subtitle).font(.callout).foregroundStyle(.secondary)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(Format.bytes(total)).font(.title2.monospacedDigit().weight(.semibold))
-                Text("\(items.count) items").font(.caption).foregroundStyle(.secondary)
-            }
+        return PaneHeader(pane: section, value: items.isEmpty ? nil : Format.bytes(total), caption: items.isEmpty ? nil : "\(items.count) items") {
             if !safe.isEmpty {
-                Button("Select all Safe (\(Format.bytes(safe.reduce(0) { $0 + $1.bytes })))") { model.selectSafe(in: section) }
-                    .padding(.leading, 12)
+                Button { model.selectSafe(in: section) } label: {
+                    Label("Select Safe · \(Format.bytes(safe.reduce(0) { $0 + $1.bytes }))", systemImage: "checkmark.seal.fill")
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                }
+                .buttonStyle(GradientButtonStyle(tint: section.tint))
+                .padding(.leading, 8)
             }
-        }
-        .padding(16)
-    }
-
-    private var subtitle: String {
-        switch section {
-        case .cleanable: "Everything that rebuilds itself or that you can safely re-download. Locked items are left out."
-        case .caches: "Package-manager, IDE, browser and app caches. Apps refill them as needed."
-        case .artifacts: "node_modules, virtualenvs, vendor, target and build output, grouped by project."
-        case .logs: "Log files that grew large. Emptied in place so running services keep working."
-        case .apps: "Installed apps with when you last opened them."
-        case .files: "Large single files and Downloads untouched for 6+ months. Your files: never pre-selected."
-        case .map: "Every home and Library folder, so nothing is hidden. Measured only."
-        default: ""
         }
     }
 

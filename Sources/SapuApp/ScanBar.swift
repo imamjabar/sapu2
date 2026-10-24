@@ -11,7 +11,7 @@ struct ScanBar: View {
                 running(layer)
             } else {
                 HStack(spacing: 8) {
-                    ForEach(ScanLayer.allCases, id: \.self) { chip($0) }
+                    ForEach(ScanLayer.allCases, id: \.self) { LayerChip(layer: $0) }
                     Spacer()
                     if let v = model.snapshot.volume {
                         Text("\(Format.bytes(v.free)) free of \(Format.bytes(v.total))")
@@ -21,26 +21,6 @@ struct ScanBar: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
-    }
-
-    private func chip(_ layer: ScanLayer) -> some View {
-        let date = model.snapshot.layerDates[layer.rawValue]
-        let took = model.snapshot.layerDurations[layer.rawValue]
-        return Button { model.scan([layer]) } label: {
-            HStack(spacing: 6) {
-                Circle().fill(date == nil ? Color.secondary.opacity(0.4) : (Date().timeIntervalSince(date!) < 86_400 ? .green : .orange))
-                    .frame(width: 7, height: 7)
-                Text(layer.short).font(.callout.weight(.medium))
-                Text(date.map { Format.age($0) } ?? "not scanned").font(.caption).foregroundStyle(.secondary)
-                if let took { Text("· \(Format.duration(took))").font(.caption).foregroundStyle(.tertiary) }
-            }
-            .lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.quaternary.opacity(0.6), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .help("Rescan only this layer. \(layer.name).")
     }
 
     @ViewBuilder private func running(_ layer: ScanLayer) -> some View {
@@ -71,6 +51,32 @@ struct ScanBar: View {
         let pct = "\(Int(p.fraction * 100))%"
         guard let eta = p.eta else { return "\(pct) · estimating…" }
         return "\(pct) · about \(Format.duration(eta)) left" + (p.etaFromHistory ? "" : " (first scan, rough)")
+    }
+}
+
+/// Freshness of one scan layer; click to rescan just that layer.
+struct LayerChip: View {
+    @EnvironmentObject var model: AppModel
+    let layer: ScanLayer
+
+    var body: some View {
+        let date = model.snapshot.layerDates[layer.rawValue]
+        let took = model.snapshot.layerDurations[layer.rawValue]
+        Button { model.scan([layer]) } label: {
+            HStack(spacing: 6) {
+                Circle().fill(date == nil ? Color.secondary.opacity(0.4) : (Date().timeIntervalSince(date!) < 86_400 ? .green : .orange))
+                    .frame(width: 7, height: 7)
+                Text(layer.short).font(.callout.weight(.medium))
+                Text(date.map { Format.age($0) } ?? "not scanned").font(.caption).foregroundStyle(.secondary)
+                if let took { Text("· \(Format.duration(took))").font(.caption).foregroundStyle(.tertiary) }
+            }
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.quaternary.opacity(0.6), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Rescan only this layer. \(layer.name).")
     }
 }
 

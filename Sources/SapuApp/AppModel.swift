@@ -74,7 +74,10 @@ final class AppModel: ObservableObject {
     }
 
     let engine = ScanEngine()
-    let hasFullDiskAccess = SystemProbe.hasFullDiskAccess
+    @Published var hasFullDiskAccess = SystemProbe.hasFullDiskAccess
+    @Published var showAccessSetup = false
+    @Published var accessJustGranted = false
+    private var accessTimer: Timer?
 
     init() {
         snapshot = Store.load() ?? Snapshot()
@@ -85,6 +88,13 @@ final class AppModel: ObservableObject {
 
     /// First launch runs the two light layers; later launches show cached results instantly.
     func onLaunch() {
+        if !hasFullDiskAccess && !UserDefaults.standard.bool(forKey: "accessSetupDismissed") {
+            showAccessSetup = true
+            watchFullDiskAccess()
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.recheckFullDiskAccess() }
+        }
         if snapshot.layerDates.isEmpty { scan([.quick, .projects]) }
         Task { await refreshVersions(network: false) }
     }
@@ -223,7 +233,51 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
+    // MARK: Full Disk Access
+    // macOS never lets an app grant itself Full Disk Access. Sapu does every other step: it gets itself
+    // listed in the pane, opens the pane, offers its icon to drag in, and notices the switch being turned on.
+
     func openFullDiskAccessSettings() {
+        _ = SystemProbe.hasFullDiskAccess   // denied open → Sapu appears in the list, switch off
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+        watchFullDiskAccess()
+    }
+
+    /// Polls with one open() per second until granted; stops itself after 10 minutes.
+    func watchFullDiskAccess() {
+        accessTimer?.invalidate()
+        let started = Date()
+        accessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
+            Task { @MainActor in
+                guard let self else { t.invalidate(); return }
+                self.recheckFullDiskAccess()
+                if self.hasFullDiskAccess || Date().timeIntervalSince(started) > 600 { t.invalidate() }
+            }
+        }
+    }
+
+    func recheckFullDiskAccess() {
+        guard !hasFullDiskAccess, SystemProbe.hasFullDiskAccess else { return }
+        hasFullDiskAccess = true
+        accessJustGranted = true
+        accessTimer?.invalidate()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func dismissAccessSetup(forever: Bool) {
+        if forever { UserDefaults.standard.set(true, forKey: "accessSetupDismissed") }
+        showAccessSetup = false
+        if accessJustGranted && scanning == nil { scan([.full]) }
+        accessJustGranted = false
+    }
+
+    /// Settings sometimes asks to quit and reopen before the grant applies; this does it in one click.
+    func relaunch() {
+        let path = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+        try? task.run()
+        NSApp.terminate(nil)
     }
 }

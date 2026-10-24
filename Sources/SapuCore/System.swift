@@ -48,10 +48,22 @@ public enum SystemProbe {
     }
 
     /// Full Disk Access is needed to size Mail, Safari, Messages and some containers.
+    /// Opens a TCC-protected file for reading (one open/close, no data read). `access()` ignores TCC, so a
+    /// real open is the only honest test. A denied open also makes macOS list the app under Full Disk Access.
     public static var hasFullDiskAccess: Bool {
-        let probe = "~/Library/Containers/com.apple.stocks".expandingTilde
-        if !DiskSizer.exists(probe) { return FileManager.default.isReadableFile(atPath: "~/Library/Safari".expandingTilde) }
-        return FileManager.default.isReadableFile(atPath: probe)
+        let probes = [
+            "~/Library/Application Support/com.apple.TCC/TCC.db",
+            "~/Library/Safari/Bookmarks.plist",
+            "~/Library/Containers/com.apple.stocks/Data/Library/Preferences/com.apple.stocks.plist",
+        ].map(\.expandingTilde)
+        var sawDenied = false
+        for p in probes {
+            let fd = open(p, O_RDONLY | O_NOFOLLOW)
+            if fd >= 0 { close(fd); return true }
+            if errno == EPERM || errno == EACCES { sawDenied = true }
+        }
+        // None of the protected files exist: nothing for Full Disk Access to unlock.
+        return !sawDenied
     }
 
     /// Homebrew service plists installed both as root daemons and user agents for the same family.
