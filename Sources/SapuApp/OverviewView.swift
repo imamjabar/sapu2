@@ -11,6 +11,7 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 HomeHero()
+                KindsGuide()
 
                 VStack(alignment: .leading, spacing: 12) {
                     SectionTitle(title: "Clean up", subtitle: "One card per kind of clutter. Open one to see why each item is there and whether it's safe.")
@@ -62,6 +63,75 @@ struct OverviewView: View {
             .padding(24)
             .frame(maxWidth: 1100)
             .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// Plain answers to "what is all this?": the four kinds of things Sapu finds, and what each label promises.
+struct KindsGuide: View {
+    @EnvironmentObject var model: AppModel
+    @AppStorage("kindsGuideHidden") private var hidden = false
+
+    private let kinds: [(Pane, String, String, String)] = [
+        (.caches, "Caches", "Copies apps and tools keep to go faster: package downloads, browser and IDE caches.", "Rebuilt by themselves"),
+        (.artifacts, "Build folders", "What a project installs or compiles: node_modules, .venv, vendor, target, build.", "One command brings them back"),
+        (.logs, "Logs", "Diaries apps write for troubleshooting. Running services keep their files.", "Emptied, not needed"),
+        (.files, "Your files", "Downloads, documents, app data, virtual machines, models, agent worktrees.", "Never ticked for you"),
+    ]
+
+    var body: some View {
+        if hidden {
+            Button { withAnimation(.easeOut(duration: 0.2)) { hidden = false } } label: {
+                Label("What's safe to delete?", systemImage: "questionmark.circle")
+            }
+            .buttonStyle(.link)
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    SectionTitle(title: "What's safe to delete?", subtitle: "Everything Sapu finds is one of four kinds. Projects you touched in the last \(model.activeDays) days are always locked.")
+                    Spacer()
+                    Button("Hide") { withAnimation(.easeOut(duration: 0.2)) { hidden = true } }.buttonStyle(.link)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                    ForEach(kinds, id: \.1) { k in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                IconTile(symbol: k.0.symbol, tint: k.0.tint, size: 24)
+                                Text(k.1).font(.headline)
+                            }
+                            Text(k.2).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Label(k.3, systemImage: k.1 == "Your files" ? "hand.raised.fill" : "arrow.uturn.backward")
+                                .font(.caption.weight(.semibold)).foregroundStyle(k.0.tint)
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
+                        .background(k.0.tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(k.0.tint.opacity(0.16)))
+                    }
+                }
+                HStack(spacing: 14) {
+                    ForEach(Safety.allCases, id: \.self) { s in
+                        HStack(spacing: 6) {
+                            SafetyBadge(safety: s)
+                            Text(s.promise).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+extension Safety {
+    /// What the label promises, in a few words.
+    var promise: String {
+        switch self {
+        case .safe: "ticked by Select Safe"
+        case .check: "read why first"
+        case .yours: "only if you tick it"
+        case .protected: "never touched"
         }
     }
 }
@@ -198,7 +268,8 @@ struct CategoryTile: View {
             return s.projects.filter { $0.status == .active }.sorted { ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast) }
                 .prefix(2).map { "\($0.name) · \(Format.age($0.lastActivity))" }
         case .security:
-            return model.versions.filter { $0.level == .eol }.prefix(2).map { "\($0.product) \($0.version) · \($0.source)" }
+            let leaks = model.securityIssues.filter { $0.level == .danger }.prefix(2).map { "\($0.projectName) · \($0.title)" }
+            return Array((leaks + model.versions.filter { $0.level == .eol }.map { "\($0.product) \($0.version) · \($0.source)" }).prefix(2))
         default:
             return s.findings.filter { pane.includes($0) && $0.action != .none }.sorted { $0.bytes > $1.bytes }
                 .prefix(2).map { "\($0.title) · \(Format.bytes($0.bytes))" }
@@ -214,8 +285,9 @@ struct CategoryTile: View {
         case .security:
             let eol = model.versions.filter { $0.level == .eol }.count
             let out = model.versions.filter { $0.level == .outdated }.count
-            if model.versions.isEmpty { return "Not checked" }
-            return eol + out == 0 ? "All good" : "\(eol + out) to fix"
+            let leaks = model.securityIssues.filter { $0.level != .info }.count
+            if model.versions.isEmpty && model.securityChecked == nil { return "Not checked" }
+            return eol + out + leaks == 0 ? "All good" : "\(eol + out + leaks) to fix"
         default:
             let items = s.findings.filter { pane.includes($0) && $0.action != .none }
             if items.isEmpty {
@@ -227,7 +299,7 @@ struct CategoryTile: View {
     }
 
     private var headlineColor: Color {
-        if pane == .security, model.versions.contains(where: { $0.level == .eol }) { return .red }
+        if pane == .security, model.versions.contains(where: { $0.level == .eol }) || model.securityIssues.contains(where: { $0.level == .danger }) { return .red }
         return .primary
     }
 }

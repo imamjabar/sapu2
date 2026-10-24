@@ -247,6 +247,7 @@ public final class ScanEngine: @unchecked Sendable {
         jobs += browserCacheJobs(running: running)
         jobs += toolVersionJobs()
         jobs += supportCacheJobs(running: running)
+        jobs += devExtraJobs(running: running, previous: previous)
         jobs += catalogJobs(running: running, existing: jobs.map(\.path))
 
         let prev = Dictionary((previous?.findings ?? []).map { ($0.path, $0.bytes) }, uniquingKeysWith: max)
@@ -265,10 +266,11 @@ public final class ScanEngine: @unchecked Sendable {
                 guard r.bytes >= Self.bloatFloor else { return nil }
                 let id = path.lastComponent
                 let app = SystemProbe.app(forBundleID: id)
-                let name = app?.name ?? Self.prettyName(id)
+                let updater = id.lowercased().hasSuffix("-updater") ? Self.capitalized(String(id.dropLast("-updater".count))) : nil
+                let name = app?.name ?? updater ?? Self.prettyName(id)
                 let open = [app?.executable, app?.name].compactMap { $0 }.contains { running.contains($0) }
                 // macOS rebuilds its own caches by redoing the work, so they are optional, not bloat.
-                return Finding(path: path, title: "\(name) cache", category: .appCaches, safety: id.hasPrefix("com.apple.") ? .check : .safe, bytes: r.bytes, files: r.files,
+                return Finding(path: path, title: updater != nil && app == nil ? "\(name) update downloads" : "\(name) cache", category: .appCaches, safety: id.hasPrefix("com.apple.") ? .check : .safe, bytes: r.bytes, files: r.files,
                                lastModified: r.newestDate,
                                reason: "\(name) keeps downloaded and rendered data here to load faster. Apps rarely trim it.",
                                usedFor: "Speeding up \(name).", owner: name, rebuild: "\(name) refills it as needed.", action: .trash,
@@ -278,7 +280,8 @@ public final class ScanEngine: @unchecked Sendable {
     }
 
     private func dotCacheJobs() -> [Job] {
-        let covered: Set<String> = ["huggingface", "torch", "uv", "puppeteer", "composer"]
+        // lm-studio may hold models (listed under DevExtras to manage in LM Studio).
+        let covered: Set<String> = ["huggingface", "torch", "uv", "puppeteer", "composer", "lm-studio"]
         return DiskSizer.children("~/.cache".expandingTilde).filter { !covered.contains($0.lastComponent) && DiskSizer.isDirectory($0) }.map { path in
             Job(path: path) { r in
                 guard r.bytes >= Self.bloatFloor else { return nil }
@@ -312,7 +315,7 @@ public final class ScanEngine: @unchecked Sendable {
                 jobs.append(Job(path: path) { r in
                     guard r.bytes >= Self.bloatFloor else { return nil }
                     let open = running.contains(app.name) || running.contains(app.exe) || running.contains(app.dir)
-                    return Finding(path: path, title: "\(app.name) \(sub)", category: .appCaches, safety: webStorage ? .check : .safe,
+                    return Finding(path: path, title: "\(app.name) \(Self.friendlyCache(sub))", category: .appCaches, safety: webStorage ? .check : .safe,
                                    bytes: r.bytes, files: r.files, lastModified: r.newestDate,
                                    reason: webStorage
                                        ? "Storage used by \(app.name) extension panels and webviews. Mostly cached web data, but some extensions keep settings here."
@@ -377,7 +380,7 @@ public final class ScanEngine: @unchecked Sendable {
                 jobs.append(Job(path: path) { r in
                     guard r.bytes >= Self.bloatFloor else { return nil }
                     let open = running.contains(b.exe) || running.contains(b.name)
-                    return Finding(path: path, title: "\(b.name) \(label)", category: .appCaches, safety: .safe, bytes: r.bytes,
+                    return Finding(path: path, title: "\(b.name) \(Self.friendlyCache(label))", category: .appCaches, safety: .safe, bytes: r.bytes,
                                    files: r.files, lastModified: r.newestDate,
                                    reason: "\(b.name) keeps copies of pages, scripts, shaders and downloaded components here. Your logins, history and bookmarks live elsewhere.",
                                    usedFor: "Loading sites and the browser faster.", owner: b.name,
@@ -528,7 +531,7 @@ public final class ScanEngine: @unchecked Sendable {
                     guard r.bytes >= Self.bloatFloor else { return nil }
                     let pretty = name == "Caches" ? String(sub.dropLast("-updater".count)) : SystemProbe.app(forBundleID: name)?.name ?? (name.contains(".") ? Self.prettyName(name) : name)
                     let open = running.contains(pretty) || running.contains(name)
-                    return Finding(path: path, title: name == "Caches" ? "\(pretty) update downloads" : "\(pretty) \(sub)", category: isLog ? .logs : .appCaches, safety: .safe,
+                    return Finding(path: path, title: name == "Caches" ? "\(Self.capitalized(pretty)) update downloads" : "\(Self.capitalized(pretty)) \(Self.friendlyCache(sub))", category: isLog ? .logs : .appCaches, safety: .safe,
                                    bytes: r.bytes, files: r.files, lastModified: r.newestDate,
                                    reason: isLog ? "Diagnostic logs \(pretty) writes in its own data folder. It rarely deletes old ones."
                                                  : "\(pretty) keeps downloaded and rendered data in its own data folder.",
@@ -540,6 +543,26 @@ public final class ScanEngine: @unchecked Sendable {
         }
         return jobs
     }
+
+    /// "Partitions/81df…/Service Worker/CacheStorage" → "offline web cache"; "User Data/Profile 1/Cache" → "web cache (Profile 1)".
+    public static func friendlyCache(_ sub: String) -> String {
+        let names: [String: String] = [
+            "cache": "web cache", "code cache": "code cache", "gpucache": "GPU cache", "cachestorage": "offline web cache",
+            "scriptcache": "service worker scripts", "dawngraphitecache": "graphics cache", "dawnwebgpucache": "graphics cache",
+            "graphitedawncache": "graphics cache", "grshadercache": "shader cache", "shadercache": "shader cache",
+            "gpupersistentcache": "graphics cache", "dawncache": "graphics cache", "component_crx_cache": "component downloads",
+            "extensions_crx_cache": "extension downloads", "completed": "crash reports", "cacheddata": "compiled code cache",
+            "cachedextensionvsixs": "extension downloads", "webstorage": "webview storage", "caches": "cache", "logs": "logs",
+        ]
+        let parts = sub.split(separator: "/").map(String.init)
+        let base = names[parts.last?.lowercased() ?? ""] ?? sub
+        let uuidLike = { (p: String) in p.count >= 16 && p.allSatisfy { $0.isHexDigit || $0 == "-" } }
+        let skip: Set<String> = ["Partitions", "Default", "User Data", "Service Worker", "Crashpad", "DesktopProfile", "cefcache"]
+        let qualifier = parts.dropLast().filter { !skip.contains($0) && !uuidLike($0) && names[$0.lowercased()] == nil }
+        return qualifier.isEmpty ? base : "\(base) (\(qualifier.joined(separator: " ")))"
+    }
+
+    static func capitalized(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
     static func prettyName(_ bundleID: String) -> String {
         let last = bundleID.split(separator: ".").last.map(String.init) ?? bundleID

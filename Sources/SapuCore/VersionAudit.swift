@@ -281,27 +281,3 @@ public enum VersionAudit {
         return (out, live)
     }
 }
-
-/// On-demand dependency vulnerability audit using each ecosystem's own tool.
-public enum DependencyAudit {
-    public static func run(projectPath: String) -> String {
-        var parts: [String] = []
-        if DiskSizer.exists(projectPath + "/package-lock.json") {
-            let r = Shell.run(["npm", "audit", "--json"], cwd: projectPath, timeout: 60)
-            if let d = r.out.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-               let meta = o["metadata"] as? [String: Any], let v = meta["vulnerabilities"] as? [String: Int] {
-                parts.append("npm: " + ["critical", "high", "moderate", "low"].map { "\(v[$0] ?? 0) \($0)" }.joined(separator: ", "))
-            } else { parts.append("npm audit failed: \(r.err.prefix(120))") }
-        }
-        if DiskSizer.exists(projectPath + "/composer.lock") {
-            let r = Shell.run(["composer", "audit", "--format=json", "--locked"], cwd: projectPath, timeout: 60)
-            if let d = r.out.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                let adv = (o["advisories"] as? [String: Any]) ?? [:]
-                let count = adv.values.reduce(0) { $0 + (($1 as? [Any])?.count ?? 0) }
-                parts.append("composer: \(count) advisories in \(adv.count) packages")
-            } else { parts.append("composer audit failed: \(r.err.prefix(120))") }
-        }
-        if parts.isEmpty { parts.append("No package-lock.json or composer.lock to audit.") }
-        return parts.joined(separator: "\n")
-    }
-}
