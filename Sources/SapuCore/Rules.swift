@@ -64,9 +64,7 @@ public enum RuleBook {
         Rule(id: "yarn.cache", title: "Yarn cache", category: .devCaches, paths: ["~/Library/Caches/Yarn"], safety: .safe,
              reason: "Yarn v1 global offline cache.", usedFor: "Faster yarn install.", owner: "Yarn",
              rebuild: "Re-downloaded on demand.", action: .command("yarn cache clean")),
-        Rule(id: "pnpm.store", title: "pnpm store", category: .devCaches, paths: ["~/Library/pnpm/store"], safety: .check,
-             reason: "Content-addressed store shared by all pnpm projects; projects hard-link into it.", usedFor: "pnpm installs.", owner: "pnpm",
-             rebuild: "Prune only removes packages no project references.", action: .command("pnpm store prune")),
+        // pnpm store: DevExtras.pnpmStores (current store pruned, older layout versions listed apart).
         Rule(id: "bun.cache", title: "Bun install cache", category: .devCaches, paths: ["~/.bun/install/cache"], safety: .safe,
              reason: "Every package version Bun installed.", usedFor: "Fast bun install.", owner: "Bun",
              rebuild: "Re-downloaded on demand.", action: .trash),
