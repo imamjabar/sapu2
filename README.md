@@ -70,6 +70,28 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - For the 628 apps on Mole's tested-apps list that Homebrew documents, Sapu's rules find 71% of the 3,918 documented leftover paths in a simulated home folder. Most of the remainder belongs to helper apps that Sapu finds by reading the installed app.
 - Run `sapu-cli coverage cask.json names.txt` to reproduce.
 
+### Developer and AI tool leftovers
+
+- **Claude Code background jobs:** scratch files of jobs that finished three or more days ago (pinned and running jobs stay).
+- **Agent worktrees:** full checkouts the Codex app (`~/.codex/worktrees`) and Claude Code (`<project>/.claude/worktrees`) leave behind. Never preselected; a worktree with uncommitted changes or used in the last three days is locked.
+- **Older JetBrains versions:** settings folders of IDE versions you upgraded from (`GoLand2024.3` when `GoLand2025.2` exists). Toolbox and the newest version stay.
+- **Codex server releases** other than the newest, Codex plugin caches, WeChat's built-in browser and mini-program caches, Feishu/Lark and DingTalk caches.
+- **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models are listed so the space is explained, but only their own app removes them.
+
+Home has a short **What's safe to delete?** guide: caches rebuild themselves, build folders come back with one command, logs are emptied, and your files are never ticked for you.
+
+### Secrets and keys in your projects
+
+After each projects scan, Sapu checks every project on this Mac (nothing is sent anywhere) and reads only the files git tracks, with size limits:
+
+- `.env` files and private keys that are committed (templates like `.env.example` are fine);
+- `.env` files that exist but aren't ignored, so `git add .` would publish them;
+- API tokens written into code: AWS, GitHub, Anthropic, OpenAI, Slack, Stripe, Google, npm, private key blocks, database URLs with a password (softened in test files);
+- passwords or tokens inside git remote URLs;
+- `package.json` without a lockfile.
+
+Secrets are shown masked (first 8 characters and the length), each with the exact fix. Try it from the terminal with `sapu-cli secrets <project…>`. The per-project dependency audit now runs npm, pnpm and composer audits, plus `cargo-audit`, `pip-audit` and `osv-scanner` when installed.
+
 ### Health and Maintenance
 
 - **Health:**
