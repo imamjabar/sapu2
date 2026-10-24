@@ -42,7 +42,8 @@ enum Pane: String, Hashable, CaseIterable, Identifiable {
     func includes(_ f: Finding) -> Bool {
         switch self {
         case .cleanable: f.isCleanable && f.safety <= .check
-        case .caches: [.devCaches, .appCaches, .xcode, .ml, .containers].contains(f.category) && f.action != .none
+        // VM disks and model libraries show too, under "Manage in their own app", so their space is explained.
+        case .caches: [.devCaches, .appCaches, .xcode, .ml, .containers].contains(f.category) && (f.action != .none || [.ml, .containers].contains(f.category))
         case .artifacts: f.category == .projects
         case .logs: f.category == .logs
         case .apps: f.category == .apps
@@ -72,6 +73,9 @@ final class AppModel: ObservableObject {
     @Published var lastReceipt: CleanReceipt?
     @Published var search = ""
     @Published var audits: [String: String] = [:]
+    @Published var securityIssues: [SecurityIssue] = []
+    @Published var checkingSecurity: String?
+    @Published var securityChecked: Date?
     @Published var allowActiveProjects = UserDefaults.standard.bool(forKey: "allowActiveProjects") {
         didSet { UserDefaults.standard.set(allowActiveProjects, forKey: "allowActiveProjects") }
     }
@@ -131,6 +135,7 @@ final class AppModel: ObservableObject {
     }
 
     private func runQueue() async {
+        var scannedProjects = false
         while !queue.isEmpty {
             let layer = queue.removeFirst()
             scanning = layer
@@ -145,7 +150,7 @@ final class AppModel: ObservableObject {
             case .projects:
                 let days = activeDays
                 let r = await engine.projects(previous: previous, activeDays: days, progress: sink)
-                if !engine.isCancelled { snapshot.replace(layer: .projects, with: r.findings); snapshot.projects = r.projects }
+                if !engine.isCancelled { snapshot.replace(layer: .projects, with: r.findings); snapshot.projects = r.projects; scannedProjects = true }
             case .full:
                 let found = await engine.full(previous: previous, progress: sink)
                 if !engine.isCancelled { snapshot.replace(layer: .full, with: found) }
@@ -160,6 +165,8 @@ final class AppModel: ObservableObject {
         scanning = nil
         progress = nil
         engine.forceFresh = false
+        // Leak checks read only what git tracks; run them once the disk is quiet again.
+        if scannedProjects { checkSecurity() }
     }
 
     /// Measures every folder again, ignoring the cache (Scan › Full rescan).
@@ -191,6 +198,35 @@ final class AppModel: ObservableObject {
         versionsLive = live
         checkingVersions = false
         snapshot.insights = Insights.build(snapshot, versions: versions)
+    }
+
+    /// Offline leak checks over every project (or one), one at a time at utility priority. Results appear as
+    /// each project finishes. Projects in Desktop, Documents and Downloads go last: macOS may ask for access there.
+    func checkSecurity(only project: Project? = nil) {
+        guard checkingSecurity == nil else { return }
+        let home = NSHomeDirectory()
+        let guarded = ["Desktop", "Documents", "Downloads"].map { home + "/" + $0 + "/" }
+        let projects = (project.map { [$0] } ?? snapshot.projects).sorted { a, b in
+            let ga = guarded.contains { a.path.hasPrefix($0) }, gb = guarded.contains { b.path.hasPrefix($0) }
+            return ga != gb ? !ga : (a.lastActivity ?? .distantPast) > (b.lastActivity ?? .distantPast)
+        }
+        guard !projects.isEmpty else { return }
+        checkingSecurity = "1 of \(projects.count)"
+        if project == nil { securityIssues = [] }
+        Task.detached(priority: .utility) {
+            for (i, p) in projects.enumerated() {
+                await MainActor.run { self.checkingSecurity = "\(i + 1) of \(projects.count) · \(p.name)" }
+                let found = ProjectSecurity.check(projectPath: p.path, name: p.name)
+                await MainActor.run {
+                    self.securityIssues = (self.securityIssues.filter { $0.projectPath != p.path } + found)
+                        .sorted { ($0.level, $0.projectName, $0.file ?? "") < ($1.level, $1.projectName, $1.file ?? "") }
+                }
+            }
+            await MainActor.run {
+                if project == nil { self.securityChecked = Date() }
+                self.checkingSecurity = nil
+            }
+        }
     }
 
     func audit(project: Project) {
