@@ -203,6 +203,60 @@ func selftest() -> Int32 {
                                      fs: subs, otherIDs: ["com.microsoft.excel", "com.microsoft.errorreporting"])
     check(!chrome2.contains { $0.contains("for.testing") } && !word.contains { $0.contains("errorreporting") },
           "uninstall: Chrome for Testing and helpers shared with other apps are kept")
+    // Sign-ins and keys stay; the caches beside them go.
+    let prof = root + "/AppData"
+    for f in ["Default/Cookies", "Default/Cache/data_0", "Partitions/x/Code Cache/js/a", "agent-session-authority.key"] {
+        try? fm.createDirectory(atPath: (prof + "/" + f as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        fm.createFile(atPath: prof + "/" + f, contents: Data("x".utf8))
+    }
+    let clean = root + "/Plain"
+    for f in ["Trust Tokens", "AUTHORS.txt", "Cache/cookies"] {   // a cookie inside a cache folder isn't searched
+        try? fm.createDirectory(atPath: (clean + "/" + f as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        fm.createFile(atPath: clean + "/" + f, contents: Data("x".utf8))
+    }
+    let creds = Credentials.find(in: prof, limit: 5)
+    check(creds.contains("Default/Cookies") && creds.contains("agent-session-authority.key") && Credentials.find(in: clean).isEmpty,
+          "credentials: cookies and keys found inside a folder; Trust Tokens and AUTHORS aren't credentials")
+    check(Set(Credentials.bloat(in: prof).map { $0.lastComponent }) == ["Cache", "Code Cache"] && Uninstaller.classify(L + "/HTTPStorages/a.b.binarycookies") == .data,
+          "credentials: caches inside a locked folder are offered; cookie jars count as data")
+    var cf = Finding(path: prof, title: "x", category: .apps, safety: .check, reason: "", usedFor: "", action: .trash, layer: .full)
+    cf.bytes = 1
+    let bundle = root + "/Old.app/Contents/Resources"
+    try? fm.createDirectory(atPath: bundle, withIntermediateDirectories: true)
+    fm.createFile(atPath: bundle + "/dsa_pub.pem", contents: Data("x".utf8))
+    var unused = cf; unused.path = root + "/Old.app"
+    check(Cleaner.credentialRefusal(cf) != nil && Cleaner.credentialRefusal(unused) == nil,
+          "credentials: cleanup refuses a leftover that holds sign-ins, not an app bundle's public keys")
+
+    // Electron profiles: caches in Partitions/<name>, Default and User Data/<profile> count, not other folders.
+    let ele = root + "/Electron"
+    for d in ["Partitions/notion/Cache", "Default/GPUCache", "User Data/Profile 1/Code Cache", "User Data/Crashpad", "Partitions/x/IndexedDB"] {
+        try? fm.createDirectory(atPath: ele + "/" + d, withIntermediateDirectories: true)
+    }
+    let profs = Set(ScanEngine.chromiumProfiles(ele).map { String($0.dropFirst(ele.count)) })
+    check(profs == ["", "/Default", "/User Data", "/Partitions/notion", "/Partitions/x", "/User Data/Profile 1"],
+          "scan: Electron profiles found in Partitions, Default and User Data (\(profs.sorted()))")
+
+    // Release-check finds: a separately installed CLI's folders, a vendor-wide updater, an earlier version's files.
+    let H = NSHomeDirectory()
+    var more = Uninstaller.FileView.simulated([
+        "/opt/homebrew/bin/reference", "\(H)/.config/reference/x", "\(L)/Logs/reference/x", "\(L)/Caches/com.example.ReferenceApp/x",
+        "/Applications/Google Chrome.app/Contents/Frameworks/G.framework/Helpers/GoogleUpdater.app/Contents/Info.plist",
+        "\(L)/Caches/com.google.GoogleUpdater/x", "\(L)/Preferences/com.microsoft.teams.plist", "\(L)/Preferences/com.microsoft.teams2.plist",
+    ])
+    more.bundleID = { $0.hasSuffix("GoogleUpdater.app") ? "com.google.GoogleUpdater" : nil }
+    let broomApp = InstalledApp(path: "/Applications/reference.app", name: "reference", bundleID: "com.example.ReferenceApp")
+    let broomL = Uninstaller.leftovers(for: broomApp, fs: more)
+    check(broomL.contains("\(L)/Caches/com.example.ReferenceApp") && !broomL.contains { $0.contains("/reference/") || $0.hasSuffix("/reference") },
+          "uninstall: folders of a separately installed CLI (Homebrew reference) stay with reference.app's removal")
+    let chrome3 = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Google Chrome.app", name: "Google Chrome", bundleID: "com.google.Chrome"), fs: more)
+    check(!chrome3.contains { $0.contains("GoogleUpdater") }, "uninstall: Google's shared updater is never one app's leftover")
+    let teams = InstalledApp(path: "/Applications/Microsoft Teams.app", name: "Microsoft Teams", bundleID: "com.microsoft.teams2")
+    let teamsL = Uninstaller.leftovers(for: teams, fs: more)
+    let teamsOther = Uninstaller.leftovers(for: teams, fs: more, otherIDs: ["com.microsoft.teams"])
+    check(teamsL.contains("\(L)/Preferences/com.microsoft.teams.plist") && Uninstaller.earlierVersion("\(L)/Preferences/com.microsoft.teams.plist", of: teams) != nil
+          && !teamsOther.contains("\(L)/Preferences/com.microsoft.teams.plist"),
+          "uninstall: an earlier version's files are labelled and kept, and skipped when that version is installed")
     let sys = InstalledApp(path: "/System/Applications/Mail.app", name: "Mail", bundleID: "com.apple.mail")
     check(Uninstaller.blockReason(sys, running: []) != nil && Uninstaller.blockReason(InstalledApp(path: "/Applications/Xcode.app", name: "Xcode", bundleID: "com.apple.dt.Xcode"), running: []) == nil,
           "uninstall: macOS apps blocked, Xcode allowed")
@@ -222,8 +276,51 @@ func selftest() -> Int32 {
     let t = Cleaner.truncateLogs(log)
     check(t.0 && (try? fm.attributesOfItem(atPath: log)[.size] as? Int) == 0, "truncate empties log in place")
 
+    // Release rule, replayed from this Mac's recording: everything reference finds, nothing unreviewed, no path for two apps.
+    if let fx = loadParity() {
+        let problems = fx.problems(found: Uninstaller.leftoversForAll(fx.installedApps, fs: fx.replay()))
+        for p in problems.prefix(20) { print("    \(p)") }
+        check(problems.isEmpty, "uninstall parity: \(fx.apps.count) apps, all of the reference's \(fx.reference.values.reduce(0) { $0 + $1.count }) paths covered, \(fx.reviewed.values.reduce(0) { $0 + $1.count }) claims reviewed, none shared")
+    } else {
+        check(false, "uninstall parity: \(parityURL.path) is missing (run scripts/release-check.sh)")
+    }
+    let testedURL = parityURL.deletingLastPathComponent().appendingPathComponent("tested-apps-fixture.json")
+    if let d = try? Data(contentsOf: testedURL), let tf = try? JSONDecoder().decode(TestedFixture.self, from: d) {
+        let problems = tf.problems(found: tf.found())
+        for p in problems.prefix(20) { print("    \(p)") }
+        check(problems.isEmpty, "the reference's tested apps: \(tf.apps.count) installed side by side, all \(tf.reference.values.reduce(0) { $0 + $1.count }) of the reference's paths covered, none shared")
+    } else {
+        check(false, "the reference's tested apps: \(testedURL.path) is missing")
+    }
+
     print(failures == 0 ? "All checks passed." : "\(failures) check(s) failed.")
     return failures == 0 ? 0 : 1
+}
+
+/// Tests/parity-fixture.json in the source tree this binary was built from.
+let parityURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("Tests/parity-fixture.json")
+
+func loadParity() -> ParityFixture? {
+    guard let d = try? Data(contentsOf: parityURL) else { return nil }
+    do { return try JSONDecoder().decode(ParityFixture.self, from: d) } catch { err("parity fixture: \(error)"); return nil }
+}
+
+func saveParity(_ fx: ParityFixture) {
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    try? FileManager.default.createDirectory(at: parityURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? enc.encode(fx).write(to: parityURL, options: .atomic)
+}
+
+/// the reference's per-app output from scripts/release-check.sh: "### name|id|path" then one path per line.
+func readReference(_ file: String) -> [String: [String]] {
+    var out: [String: [String]] = [:], cur: String?
+    for line in ((try? String(contentsOfFile: file, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init) {
+        if line.hasPrefix("### ") { cur = String(line.dropFirst(4).split(separator: "|", omittingEmptySubsequences: false)[0]); out[cur!] = []; continue }
+        guard let c = cur, !line.isEmpty, !line.hasPrefix("PROTECTED ") else { continue }
+        out[c, default: []].append(ParityFixture.tilde(line))
+    }
+    return out
 }
 
 switch command {
@@ -273,18 +370,83 @@ case "apps":
     let wanted = args.dropFirst().filter { !$0.hasPrefix("--") }.map { $0.lowercased() }
     let running = SystemProbe.runningProcessNames()
     if wanted.isEmpty && !args.contains("--all") {
-        for a in all { print("\(a.name)\t\(a.bundleID ?? "-")\t\(a.caskToken.map { "brew:\($0)" } ?? (a.fromAppStore ? "App Store" : ""))") }
+        for a in all { print("\(a.name)\t\(a.bundleID ?? "-")\t\(a.caskToken.map { "brew:\($0)" } ?? (a.fromAppStore ? "App Store" : ""))\t\(a.path)") }
     }
     for a in all where wanted.contains(a.name.lowercased()) || wanted.contains(a.bundleID?.lowercased() ?? "") || args.contains("--all") {
         let plan = Uninstaller.plan(for: a, running: running, apps: all, sized: !args.contains("--no-size"))
         print("\(a.name) (\(a.bundleID ?? "no id"))  total \(Format.bytes(plan.totalBytes)), selected \(Format.bytes(plan.selectedBytes))\(plan.blocked.map { "  BLOCKED: \($0)" } ?? "")")
-        for i in plan.items { print("  [\(i.selected ? "x" : " ")] \(i.kind.rawValue.padding(toLength: 5, withPad: " ", startingAt: 0)) \(Format.bytes(i.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(i.path.tildePath)\(i.holdBack ? "  (kept)" : "")") }
+        for i in plan.items { print("  [\(i.selected ? "x" : " ")] \(i.kind.rawValue.padding(toLength: 5, withPad: " ", startingAt: 0)) \(Format.bytes(i.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(i.path.tildePath)\(i.locked != nil ? "  (locked: sign-ins or keys)" : i.holdBack ? "  (kept)" : "")") }
     }
+case "creds":
+    // sapu-cli creds <path…>   what sign-ins or keys Sapu sees inside each path (read-only)
+    for p in args.dropFirst() { print("\(Credentials.find(in: p, limit: 3).joined(separator: ", "))\t\(p)") }
+case "tested-record":
+    // sapu-cli tested-record <export dir> <reference.txt> [--version v]   save the tested-apps comparison for selftest
+    guard args.count >= 3, let d = FileManager.default.contents(atPath: args[1] + "/zap.json"),
+          let raw = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { err("usage: sapu-cli tested-record <dir> <reference.txt>"); exit(2) }
+    // Each app gets the bundle ID reference was given (the "### name|id|path" lines), so both tools judge the same app.
+    var referenceIDs: [String: String] = [:]
+    for line in ((try? String(contentsOfFile: args[2], encoding: .utf8)) ?? "").split(separator: "\n") where line.hasPrefix("### ") {
+        let f = line.dropFirst(4).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        if f.count > 1 { referenceIDs[f[0]] = f[1] }
+    }
+    let apps = raw.map { r -> TestedFixture.App in
+        let name = r["name"] as? String ?? ""
+        return TestedFixture.App(name: name, id: referenceIDs[name] ?? r["id"] as? String ?? "", zap: r["zap"] as? [String] ?? [])
+    }
+    let version = args.firstIndex(of: "--version").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "?"
+    let url = parityURL.deletingLastPathComponent().appendingPathComponent("tested-apps-fixture.json")
+    let old = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(TestedFixture.self, from: $0) }
+    let tf = TestedFixture(referenceVersion: version, apps: apps, reference: readReference(args[2]), referenceMistakes: old?.referenceMistakes ?? [:])
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    try? enc.encode(tf).write(to: url, options: .atomic)
+    let problems = tf.problems(found: tf.found())
+    for p in problems { print("✗ \(p)") }
+    print(problems.isEmpty ? "Tested apps check passed: \(apps.count) apps." : "Tested apps check failed: \(problems.count) problem(s).")
+    exit(problems.isEmpty ? 0 : 1)
+case "parity":
+    // sapu-cli parity record <reference.txt> [--version v]   re-record this Mac (keeps the hand review), then check
+    // sapu-cli parity check                             check the saved recording
+    // sapu-cli parity todo                              print what still needs a decision, as JSON
+    let sub = args.dropFirst().first ?? "check"
+    var fx = loadParity()
+    if sub == "record", args.count > 2 {
+        // Never record over a hand review that failed to load.
+        if fx == nil, FileManager.default.fileExists(atPath: parityURL.path) { err("Can't read \(parityURL.path); not overwriting its review."); exit(2) }
+        let apps = Uninstaller.installedApps()
+        let (disk, _) = ParityFixture.record(apps: apps)
+        let version = args.firstIndex(of: "--version").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "?"
+        let df = ISO8601DateFormatter(); df.formatOptions = [.withFullDate]
+        fx = ParityFixture(made: df.string(from: Date()), referenceVersion: version,
+                           apps: apps.map { .init(name: $0.name, id: $0.bundleID, path: $0.path) }, disk: disk,
+                           reference: readReference(args[2]), referenceMistakes: fx?.referenceMistakes ?? [:], reviewed: fx?.reviewed ?? [:])
+        saveParity(fx!)
+    }
+    guard let fx else { err("No recording yet. Run scripts/release-check.sh"); exit(2) }
+    let found = Uninstaller.leftoversForAll(fx.installedApps, fs: fx.replay())
+    if sub == "todo" {
+        var todo: [String: [String: [String]]] = [:]
+        for a in fx.apps {
+            let mine = (found[a.name] ?? []).map(ParityFixture.tilde)
+            let unreviewed = mine.filter { fx.reviewed[a.name]?[$0] == nil }
+            let missed = (fx.reference[a.name] ?? []).filter { p in fx.referenceMistakes[a.name]?[p] == nil &&
+                !mine.contains { p.lowercased() == $0.lowercased() || p.lowercased().hasPrefix($0.lowercased() + "/") } }
+            if !unreviewed.isEmpty || !missed.isEmpty { todo[a.name] = ["unreviewed": unreviewed, "referenceOnly": missed] }
+        }
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        print(String(data: try! enc.encode(todo), encoding: .utf8)!)
+        exit(0)
+    }
+    let problems = fx.problems(found: found)
+    for p in problems { print("✗ \(p)") }
+    print(problems.isEmpty ? "Release check passed: \(fx.apps.count) apps, reference \(fx.referenceVersion), recorded \(fx.made)." : "Release check failed: \(problems.count) problem(s).")
+    exit(problems.isEmpty ? 0 : 1)
 case "coverage":
     // sapu-cli coverage <cask.json> <app-names.txt>
     // For each listed app Homebrew knows, rebuild its documented leftovers ("zap" list) as a simulated
     // file system and check how many of them the uninstaller finds by its own rules.
-    let rest = args.dropFirst().filter { !$0.hasPrefix("--") }.map(\.expandingTilde)
+    let exportValue = args.firstIndex(of: "--export").map { $0 + 1 }
+    let rest = args.indices.dropFirst().filter { !args[$0].hasPrefix("--") && $0 != exportValue }.map { args[$0].expandingTilde }
     guard rest.count == 2 || (rest.count == 1 && args.contains("--real")), let data = FileManager.default.contents(atPath: rest[0]),
           let casks = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
           let names = rest.count == 2 ? try? String(contentsOfFile: rest[1], encoding: .utf8) : "" else { print("usage: sapu-cli coverage <cask.json> <names.txt>"); exit(2) }
@@ -329,6 +491,10 @@ case "coverage":
         print("Leftovers present: \(total) (\(Format.bytes(bytesAll))). Found by Sapu: \(hit) (\(total > 0 ? 100 * hit / total : 0)%), \(Format.bytes(bytesHit)) (\(bytesAll > 0 ? Int(100 * bytesHit / bytesAll) : 0)% of the space).")
         exit(0)
     }
+    // --export <dir>: also write the leftovers as a fake home folder (<dir>/home), the apps (<dir>/apps.tsv) and what
+    // Sapu finds (<dir>/sapu.txt), so another tool can be run on exactly the same files.
+    let exportDir = args.firstIndex(of: "--export").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1].expandingTilde : nil }
+    var exportApps = "", exportList: [(InstalledApp, [String])] = []
     var tested = 0, matched = 0, totalPaths = 0, foundPaths = 0, unmatched: [String] = []
     var misses: [String: Int] = [:], examples: [String: String] = [:]
     for raw in names.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) where !raw.isEmpty {
@@ -357,12 +523,28 @@ case "coverage":
             for z in zap {
                 var leaf = z.lastComponent
                 for ext in [".plist", ".savedState", ".binarycookies", ".sfl2", ".sfl3", ".sfl4"] where leaf.hasSuffix(ext) { leaf = String(leaf.dropLast(ext.count)) }
-                if leaf.range(of: idPattern, options: .regularExpression) != nil, !leaf.hasSuffix(".x"), !leaf.contains("x.") { counts[leaf, default: 0] += 1 }
+                if leaf.range(of: idPattern, options: .regularExpression) != nil, !leaf.split(separator: ".").contains("x") { counts[leaf, default: 0] += 1 }
             }
             id = counts.max { $0.value == $1.value ? $0.key.count > $1.key.count : $0.value < $1.value }?.key
         }
         let app = InstalledApp(path: "/Applications/\(cask.app).app", name: cask.app, bundleID: id, version: nil, executable: nil, fromAppStore: false, caskToken: cask.token)
-        let found = Uninstaller.leftovers(for: app, fs: .simulated(zap)).map { $0.lowercased() }
+        let foundCased = Uninstaller.leftovers(for: app, fs: .simulated(zap))
+        let found = foundCased.map { $0.lowercased() }
+        if let dir = exportDir {
+            let fakeHome = dir + "/home"
+            for z in zap where z.hasPrefix(home + "/") {
+                let target = fakeHome + z.dropFirst(home.count)
+                let isFile = [".plist", ".binarycookies", ".sfl2", ".sfl3", ".sfl4", ".json", ".db", ".log", ".txt", ".sqlite"].contains { z.lowercased().hasSuffix($0) }
+                if isFile {
+                    try? FileManager.default.createDirectory(atPath: (target as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                    if !FileManager.default.fileExists(atPath: target) { FileManager.default.createFile(atPath: target, contents: Data()) }
+                } else {
+                    try? FileManager.default.createDirectory(atPath: target, withIntermediateDirectories: true)
+                }
+            }
+            exportApps += "\(cask.app)\t\(id ?? "")\t\t/Applications/\(cask.app).app\n"
+            exportList.append((app, zap))
+        }
         for z in zap {
             totalPaths += 1
             let l = z.lowercased()
@@ -374,6 +556,22 @@ case "coverage":
             if args.contains("--misses") { print("MISS\t\(cask.app)\t\(id ?? "-")\t\(z.tildePath)") }
             if examples[bucket] == nil { examples[bucket] = "\(cask.app) (\(id ?? "no id")): \(z.tildePath)" }
         }
+    }
+    if let dir = exportDir {
+        // Every app installed side by side on one Mac: each sees all the others' files and IDs.
+        let merged = Uninstaller.FileView.simulated(exportList.flatMap(\.1))
+        let ids = exportList.map { $0.0.bundleID?.lowercased() ?? "" }
+        let allIDs = Set(ids.filter { !$0.isEmpty })
+        var out = ""
+        for (i, (app, _)) in exportList.enumerated() {
+            let names = Set(exportList.map { $0.0.name.lowercased() }).subtracting([app.name.lowercased()])
+            let found = Uninstaller.leftovers(for: app, fs: merged, otherIDs: allIDs.subtracting([ids[i]]), otherNames: names)
+            out += "### \(app.name)\n" + found.map { $0.tildePath + "\n" }.joined()
+        }
+        try? exportApps.write(toFile: dir + "/apps.tsv", atomically: true, encoding: .utf8)
+        let zapJSON = exportList.map { ["name": $0.0.name, "id": $0.0.bundleID ?? "", "zap": $0.1.map(\.tildePath)] as [String: Any] }
+        try? JSONSerialization.data(withJSONObject: zapJSON, options: [.sortedKeys]).write(to: URL(fileURLWithPath: dir + "/zap.json"))
+        try? out.write(toFile: dir + "/sapu.txt", atomically: true, encoding: .utf8)
     }
     print("Apps on the list: \(tested). Known to Homebrew with documented leftovers: \(matched).")
     print("Documented leftover paths in your home folder: \(totalPaths). Found by Sapu's rules: \(foundPaths) (\(totalPaths > 0 ? 100 * foundPaths / totalPaths : 0)%).")

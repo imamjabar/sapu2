@@ -262,12 +262,13 @@ public final class ScanEngine: @unchecked Sendable {
             !RuleBook.coveredCacheNames.contains($0.lastComponent) && DiskSizer.isDirectory($0)
         }.map { path in
             Job(path: path) { r in
-                guard r.bytes >= 50_000_000 else { return nil }
+                guard r.bytes >= Self.bloatFloor else { return nil }
                 let id = path.lastComponent
                 let app = SystemProbe.app(forBundleID: id)
                 let name = app?.name ?? Self.prettyName(id)
                 let open = [app?.executable, app?.name].compactMap { $0 }.contains { running.contains($0) }
-                return Finding(path: path, title: "\(name) cache", category: .appCaches, safety: .safe, bytes: r.bytes, files: r.files,
+                // macOS rebuilds its own caches by redoing the work, so they are optional, not bloat.
+                return Finding(path: path, title: "\(name) cache", category: .appCaches, safety: id.hasPrefix("com.apple.") ? .check : .safe, bytes: r.bytes, files: r.files,
                                lastModified: r.newestDate,
                                reason: "\(name) keeps downloaded and rendered data here to load faster. Apps rarely trim it.",
                                usedFor: "Speeding up \(name).", owner: name, rebuild: "\(name) refills it as needed.", action: .trash,
@@ -280,7 +281,7 @@ public final class ScanEngine: @unchecked Sendable {
         let covered: Set<String> = ["huggingface", "torch", "uv", "puppeteer", "composer"]
         return DiskSizer.children("~/.cache".expandingTilde).filter { !covered.contains($0.lastComponent) && DiskSizer.isDirectory($0) }.map { path in
             Job(path: path) { r in
-                guard r.bytes >= 100_000_000 else { return nil }
+                guard r.bytes >= Self.bloatFloor else { return nil }
                 let name = path.lastComponent
                 return Finding(path: path, title: "~/.cache/\(name)", category: .devCaches, safety: .check, bytes: r.bytes, files: r.files,
                                lastModified: r.newestDate,
@@ -300,13 +301,16 @@ public final class ScanEngine: @unchecked Sendable {
         for app in apps {
             let base = "~/Library/Application Support/\(app.dir)".expandingTilde
             guard DiskSizer.exists(base) else { continue }
-            for sub in Self.chromiumCacheDirs + ["CachedData", "CachedExtensionVSIXs", "WebStorage"] {
-                let path = base + "/" + sub
-                guard DiskSizer.isDirectory(path) else { continue }
+            let subs = Self.chromiumProfiles(base).flatMap { root in
+                (Self.chromiumCacheDirs + Self.chromiumSharedCaches + (root == base ? ["CachedData", "CachedExtensionVSIXs", "WebStorage"] : []))
+                    .map { (root + "/" + $0, String((root + "/" + $0).dropFirst(base.count + 1))) }
+            }
+            for (path, sub) in subs {
+                guard DiskSizer.isDirectory(path), !DiskSizer.isSymlink(path) else { continue }
                 // WebStorage holds extension webview state (IndexedDB, local storage), not just cache.
                 let webStorage = sub == "WebStorage"
                 jobs.append(Job(path: path) { r in
-                    guard r.bytes >= 50_000_000 else { return nil }
+                    guard r.bytes >= Self.bloatFloor else { return nil }
                     let open = running.contains(app.name) || running.contains(app.exe) || running.contains(app.dir)
                     return Finding(path: path, title: "\(app.name) \(sub)", category: .appCaches, safety: webStorage ? .check : .safe,
                                    bytes: r.bytes, files: r.files, lastModified: r.newestDate,
@@ -320,6 +324,27 @@ public final class ScanEngine: @unchecked Sendable {
             }
         }
         return jobs
+    }
+
+    /// Bloat under 1 MB isn't worth a row.
+    static let bloatFloor: Int64 = 1_000_000
+
+    /// Chromium's profile-wide caches (shaders, downloaded components), in browsers and Electron apps alike.
+    static let chromiumSharedCaches = ["GrShaderCache", "ShaderCache", "GraphiteDawnCache", "GPUPersistentCache", "DawnCache",
+                                       "component_crx_cache", "extensions_crx_cache", "Crashpad/completed"]
+
+    /// Where an Electron or Chromium app keeps profiles: the folder itself, Default, Partitions/<name>, User Data/<profile>.
+    public static func chromiumProfiles(_ base: String) -> [String] {
+        var out = [base]
+        for sub in ["Default", "User Data", "User Data/Default", "cefcache"] where DiskSizer.isDirectory(base + "/" + sub) { out.append(base + "/" + sub) }
+        for holder in [base + "/Partitions", base + "/User Data", base + "/DesktopProfile"] {
+            for p in DiskSizer.children(holder, includeHidden: false) where DiskSizer.isDirectory(p) && !DiskSizer.isSymlink(p) && !out.contains(p) {
+                let n = p.lastComponent
+                if holder.hasSuffix("/User Data"), !(n == "Default" || n.hasPrefix("Profile ")) { continue }
+                out.append(p)
+            }
+        }
+        return out
     }
 
     /// Cache folders every Chromium-based app writes, per profile or at the top of its data folder.
@@ -350,7 +375,7 @@ public final class ScanEngine: @unchecked Sendable {
             for path in paths where DiskSizer.isDirectory(path) {
                 let label = String(path.dropFirst(base.count + 1))
                 jobs.append(Job(path: path) { r in
-                    guard r.bytes >= 20_000_000 else { return nil }
+                    guard r.bytes >= Self.bloatFloor else { return nil }
                     let open = running.contains(b.exe) || running.contains(b.name)
                     return Finding(path: path, title: "\(b.name) \(label)", category: .appCaches, safety: .safe, bytes: r.bytes,
                                    files: r.files, lastModified: r.newestDate,
@@ -365,7 +390,7 @@ public final class ScanEngine: @unchecked Sendable {
         let updater = support + "/Google/GoogleUpdater/crx_cache"
         if DiskSizer.isDirectory(updater) {
             jobs.append(Job(path: updater) { r in
-                guard r.bytes >= 20_000_000 else { return nil }
+                guard r.bytes >= Self.bloatFloor else { return nil }
                 return Finding(path: updater, title: "Google Updater downloads", category: .appCaches, safety: .safe, bytes: r.bytes,
                                files: r.files, lastModified: r.newestDate,
                                reason: "Update packages Google Updater already installed. It keeps them in case it needs to repair Chrome.",
@@ -384,7 +409,7 @@ public final class ScanEngine: @unchecked Sendable {
         let current = (try? FileManager.default.destinationOfSymbolicLink(atPath: "~/.local/bin/claude".expandingTilde)) ?? ""
         for v in DiskSizer.children(claude, includeHidden: false) where v != current && !processes.contains(v) {
             jobs.append(Job(path: v) { r in
-                guard r.bytes >= 20_000_000 else { return nil }
+                guard r.bytes >= Self.bloatFloor else { return nil }
                 return Finding(path: v, title: "Claude Code \(v.lastComponent) (old version)", category: .devCaches, safety: .safe,
                                bytes: r.bytes, files: r.files, lastModified: r.newestDate,
                                reason: "Claude Code downloads each new version next to the old ones. You run \(current.lastComponent.isEmpty ? "a newer one" : current.lastComponent).",
@@ -395,7 +420,7 @@ public final class ScanEngine: @unchecked Sendable {
         let pyinstaller = "~/Library/Application Support/pyinstaller".expandingTilde
         if DiskSizer.isDirectory(pyinstaller) {
             jobs.append(Job(path: pyinstaller) { r in
-                guard r.bytes >= 20_000_000 else { return nil }
+                guard r.bytes >= Self.bloatFloor else { return nil }
                 return Finding(path: pyinstaller, title: "PyInstaller cache", category: .devCaches, safety: .safe, bytes: r.bytes,
                                files: r.files, lastModified: r.newestDate,
                                reason: "Bootloaders and analysed binaries PyInstaller kept from earlier app builds.",
@@ -408,7 +433,7 @@ public final class ScanEngine: @unchecked Sendable {
         if let live = try? FileManager.default.destinationOfSymbolicLink(atPath: versions + "/Current") {
             for v in DiskSizer.children(versions, includeHidden: false) where v.lastComponent != live && v.lastComponent != "Current" {
                 jobs.append(Job(path: v) { r in
-                    guard r.bytes >= 50_000_000 else { return nil }
+                    guard r.bytes >= Self.bloatFloor else { return nil }
                     return Finding(path: v, title: "Chrome \(v.lastComponent) (previous version)", category: .apps, safety: .safe,
                                    bytes: r.bytes, files: r.files, lastModified: r.newestDate,
                                    reason: "Chrome updated to \(live) but keeps the old version inside the app until you fully quit and reopen it.",
@@ -442,7 +467,7 @@ public final class ScanEngine: @unchecked Sendable {
                 let owner = app?.name ?? String(entry.label.split(separator: " ").first ?? "")
                 let names = [app?.name, app?.executable, owner].compactMap { $0?.lowercased() }
                 jobs.append(Job(path: path) { r in
-                    guard r.bytes >= 10_000_000 else { return nil }
+                    guard r.bytes >= Self.bloatFloor else { return nil }
                     let open = names.contains { runningLower.contains($0) }
                     let isLog = entry.category == .logs
                     let title = app.map { a in entry.label.replacingOccurrences(of: owner, with: a.name) } ?? entry.label
@@ -483,15 +508,27 @@ public final class ScanEngine: @unchecked Sendable {
         for app in DiskSizer.children(support, includeHidden: false) where DiskSizer.isDirectory(app) && !skip.contains(app.lastComponent) {
             let name = app.lastComponent
             if name.hasPrefix("com.apple.") { continue }
-            for sub in ["Cache", "Caches", "Code Cache", "GPUCache", "logs", "Logs", "Crashpad/completed"] {
-                let path = app + "/" + sub
-                guard DiskSizer.isDirectory(path), !DiskSizer.isSymlink(path) else { continue }
+            // Electron apps keep Chromium caches per profile (Notion's Partitions, Codex's Default) as well as at the top.
+            var subs = ["Cache", "Caches", "Code Cache", "GPUCache", "logs", "Logs"].map { (app + "/" + $0, $0) }
+            for root in Self.chromiumProfiles(app) {
+                for c in Self.chromiumCacheDirs + Self.chromiumSharedCaches where root != app || !["Cache", "Code Cache", "GPUCache"].contains(c) {
+                    subs.append((root + "/" + c, String((root + "/" + c).dropFirst(app.count + 1))))
+                }
+            }
+            // Update packages electron-updater downloaded and already installed (~/Library/Application Support/Caches/notion-updater).
+            if name == "Caches" {
+                subs = DiskSizer.children(app, includeHidden: false).filter { $0.lastComponent.hasSuffix("-updater") }.map { ($0, $0.lastComponent) }
+            }
+            var once = Set<String>()
+            for (path, sub) in subs {
+                // The disk ignores case: logs and Logs are one folder.
+                guard DiskSizer.isDirectory(path), !DiskSizer.isSymlink(path), once.insert(path.lowercased()).inserted else { continue }
                 let isLog = sub.lowercased() == "logs"
                 jobs.append(Job(path: path) { r in
-                    guard r.bytes >= 30_000_000 else { return nil }
-                    let pretty = SystemProbe.app(forBundleID: name)?.name ?? (name.contains(".") ? Self.prettyName(name) : name)
+                    guard r.bytes >= Self.bloatFloor else { return nil }
+                    let pretty = name == "Caches" ? String(sub.dropLast("-updater".count)) : SystemProbe.app(forBundleID: name)?.name ?? (name.contains(".") ? Self.prettyName(name) : name)
                     let open = running.contains(pretty) || running.contains(name)
-                    return Finding(path: path, title: "\(pretty) \(sub)", category: isLog ? .logs : .appCaches, safety: .safe,
+                    return Finding(path: path, title: name == "Caches" ? "\(pretty) update downloads" : "\(pretty) \(sub)", category: isLog ? .logs : .appCaches, safety: .safe,
                                    bytes: r.bytes, files: r.files, lastModified: r.newestDate,
                                    reason: isLog ? "Diagnostic logs \(pretty) writes in its own data folder. It rarely deletes old ones."
                                                  : "\(pretty) keeps downloaded and rendered data in its own data folder.",

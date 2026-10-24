@@ -9,6 +9,11 @@ APP="$OUT/Sapu.app"
 
 scripts/build.sh release
 
+# Nothing ships unless the uninstall release check passes (reference parity, every claim reviewed, no shared claims)
+# and the self-tests pass. SAPU_REPLAY_ONLY=1 checks the saved recording instead of rerunning reference (CI).
+if [ "${SAPU_REPLAY_ONLY:-}" = "1" ]; then build/sapu-cli parity check; else scripts/release-check.sh; fi
+build/sapu-cli selftest >/dev/null || { build/sapu-cli selftest | grep "✗"; echo "Self-tests failed; not packaging."; exit 1; }
+
 # Icon (rendered once, then cached in Resources/).
 if [ ! -f Resources/AppIcon.icns ]; then
   echo "→ icon"

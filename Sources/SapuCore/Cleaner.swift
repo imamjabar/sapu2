@@ -70,6 +70,11 @@ public enum Cleaner {
                 item.message = "Skipped: \(why)"
                 items.append(item); continue
             }
+            // Leftovers of removed apps (containers, web data) can still hold sign-ins or keys: those stay.
+            if let why = credentialRefusal(f) {
+                item.message = "Skipped: \(why)"
+                items.append(item); continue
+            }
             switch f.action {
             case .trash:
                 (item.ok, item.message, item.trashedTo) = trash(f.path)
@@ -93,6 +98,12 @@ public enum Cleaner {
         let receipt = CleanReceipt(date: Date(), items: items, freeBefore: before, freeAfter: SystemProbe.volume().free)
         save(receipt)
         return receipt
+    }
+
+    /// Leftovers of removed apps (containers, web data) can still hold sign-ins or keys: those stay.
+    public static func credentialRefusal(_ f: Finding) -> String? {
+        guard f.category == .apps, f.action == .trash, let c = Credentials.find(in: f.path, limit: 1, failSafe: false).first else { return nil }
+        return "holds sign-ins or keys (\(c.lastComponent))."
     }
 
     static func trash(_ path: String) -> (Bool, String, String?) {

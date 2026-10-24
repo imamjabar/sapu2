@@ -242,6 +242,8 @@ enum AppCatalog {
         ("~/Library/Caches/com.alibaba.AliLang.osx", "AliLang cache", .appCaches),
         ("~/Library/Caches/com.alibaba.teambitiondisk", "Teambitiondisk cache", .appCaches),
         ("~/Library/Caches/com.anthropic.claudefordesktop", "Claudefordesktop cache", .appCaches),
+        ("~/.codex/.tmp/bundled-marketplaces", "Codex plugin marketplace copies", .devCaches),
+        ("~/.codex/.tmp/plugins", "Codex plugin downloads", .devCaches),
         ("~/Library/Caches/com.any.do.*", "Do cache", .appCaches),
         ("~/Library/Caches/com.anydesk.*", "Anydesk cache", .appCaches),
         ("~/Library/Caches/com.apple.AppleMediaServices", "AppleMediaServices cache", .appCaches),

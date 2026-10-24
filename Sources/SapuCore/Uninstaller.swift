@@ -41,6 +41,8 @@ public struct UninstallItem: Codable, Sendable, Identifiable, Hashable {
     /// Never preselected even when removing personal data (browser profiles, shared app groups, game libraries).
     public var holdBack: Bool
     public var note: String
+    /// Why it can't be chosen at all: it holds sign-ins or keys. Never selected, never removed.
+    public var locked: String? = nil
 }
 
 public struct UninstallPlan: Codable, Sendable, Identifiable {
@@ -176,27 +178,56 @@ public enum Uninstaller {
         let paths = [app.path] + leftovers(for: app, apps: apps ?? installedApps())
         guard sized else {
             let items = paths.enumerated().map { i, path -> UninstallItem in
-                let kind = i == 0 ? UninstallItem.Kind.app : classify(path), hold = i == 0 ? false : holdBack(path)
+                let kind = i == 0 ? UninstallItem.Kind.app : classify(path), old = i == 0 ? nil : earlierVersion(path, of: app)
+                let hold = i == 0 ? false : old != nil || holdBack(path)
                 return UninstallItem(path: path, kind: kind, bytes: 0, selected: i == 0 || (!hold && (kind == .cache || kind == .agent)),
-                                     holdBack: hold, note: i == 0 ? appNote(app) : note(for: path, kind: kind, hold: hold))
+                                     holdBack: hold, note: i == 0 ? appNote(app) : note(for: path, kind: kind, hold: hold, earlier: old))
             }
             var p = UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
             p.sized = false
             return p
         }
-        // Sizing is most of the work (the app bundle alone can be 3 GB of small files): a few folders at a time.
-        let sizes = Locked([Int64](repeating: 0, count: paths.count))
+        // Sign-ins and keys stay: a data folder or file holding them is locked, and the cache folders
+        // inside it (where the space usually is) are offered on their own.
+        let secrets = Locked([Int: [String]]())
         DispatchQueue.concurrentPerform(iterations: paths.count) { i in
-            let b = DiskSizer.size(paths[i]).bytes
+            guard i > 0, classify(paths[i]) == .data else { return }
+            let found = Credentials.find(in: paths[i])
+            if !found.isEmpty { secrets.mutate { $0[i] = found } }
+        }
+        let locked = secrets.value
+        var all = paths, parent: [Int: Int] = [:]
+        for i in locked.keys.sorted() where DiskSizer.isDirectory(paths[i]) {
+            for b in Credentials.bloat(in: paths[i]) { parent[all.count] = i; all.append(b) }
+        }
+        // Sizing is most of the work (the app bundle alone can be 3 GB of small files): a few folders at a time.
+        let sizes = Locked([Int64](repeating: 0, count: all.count))
+        DispatchQueue.concurrentPerform(iterations: all.count) { i in
+            let b = DiskSizer.size(all[i]).bytes
             sizes.mutate { $0[i] = b }
         }
-        let bytes = sizes.value
+        var bytes = sizes.value
+        // Caches under 1 MB aren't worth a row.
+        let bloat = parent.keys.sorted().filter { bytes[$0] >= 1_000_000 }
+        for b in bloat { bytes[parent[b]!] -= bytes[b] }
         var items = [UninstallItem(path: app.path, kind: .app, bytes: bytes[0], selected: true, holdBack: false, note: appNote(app))]
         for (i, path) in paths.enumerated().dropFirst() {
-            let kind = classify(path)
-            let hold = holdBack(path)
+            let kind = classify(path), old = earlierVersion(path, of: app)
+            if let found = locked[i] {
+                let inside = bloat.filter { parent[$0] == i }
+                items.append(UninstallItem(path: path, kind: kind, bytes: bytes[i], selected: false, holdBack: true,
+                                           note: "Holds sign-ins or keys (\(found.prefix(2).map(\.lastComponent).joined(separator: ", "))). Sapu keeps it"
+                                               + (inside.isEmpty ? "." : "; its caches are listed above and go."),
+                                           locked: "Holds sign-ins or keys."))
+                for b in inside {
+                    items.append(UninstallItem(path: all[b], kind: .cache, bytes: bytes[b], selected: true, holdBack: false,
+                                               note: "Cache inside \(path.lastComponent). Rebuilt by the app; the rest of that folder stays."))
+                }
+                continue
+            }
+            let hold = old != nil || holdBack(path)
             items.append(UninstallItem(path: path, kind: kind, bytes: bytes[i], selected: !hold && (kind == .cache || kind == .agent),
-                                       holdBack: hold, note: note(for: path, kind: kind, hold: hold)))
+                                       holdBack: hold, note: note(for: path, kind: kind, hold: hold, earlier: old)))
         }
         return UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
     }
@@ -210,6 +241,8 @@ public enum Uninstaller {
 
     public static func classify(_ p: String) -> UninstallItem.Kind {
         if p.hasPrefix(lib + "/LaunchAgents/") { return .agent }
+        // Cookie jars are sign-ins, not cache.
+        if p.hasSuffix(".binarycookies") { return .data }
         // A few apps keep real data under Caches (Spotify offline songs, Raycast clipboard images).
         let cacheData = ["com.spotify.client", "com.raycast.macos", "MullvadBrowser"]
         if p.hasPrefix(lib + "/Caches/"), !cacheData.contains(where: { p.hasPrefix(lib + "/Caches/" + $0) }) { return .cache }
@@ -230,7 +263,22 @@ public enum Uninstaller {
         return l.hasPrefix((lib + "/Containers/com.isaacmarovitz.whisky").lowercased())
     }
 
-    static func note(for p: String, kind: UninstallItem.Kind, hold: Bool) -> String {
+    /// The other ID when a path belongs to an earlier version of the app (com.microsoft.teams for
+    /// com.microsoft.teams2, com.omnigroup.OmniFocus3 for OmniFocus4): a different app, so never preselected.
+    public static func earlierVersion(_ p: String, of app: InstalledApp) -> String? {
+        guard let id = app.bundleID else { return nil }
+        let family = id.replacingOccurrences(of: "[0-9]+$", with: "", options: .regularExpression)
+        guard family != id else { return nil }
+        var leaf = p.lastComponent
+        for ext in [".plist", ".savedState", ".binarycookies"] where leaf.hasSuffix(ext) { leaf = String(leaf.dropLast(ext.count)) }
+        let l = leaf.lowercased()
+        guard l != id.lowercased(), l == family.lowercased() || l.range(of: "^" + NSRegularExpression.escapedPattern(for: family.lowercased()) + "[0-9]+$", options: .regularExpression) != nil
+        else { return nil }
+        return leaf
+    }
+
+    static func note(for p: String, kind: UninstallItem.Kind, hold: Bool, earlier: String? = nil) -> String {
+        if let earlier { return "Left by an earlier version (\(earlier)), which isn't installed. Kept unless you choose it." }
         if hold { return p.contains("/Group Containers/") ? "Shared between this app and its helpers or sibling apps. Kept unless you choose it."
                                                            : "Profiles, libraries or saved games. Kept unless you choose it." }
         switch kind {
@@ -250,6 +298,11 @@ public enum Uninstaller {
         public var isSymlink: @Sendable (String) -> Bool
         public var children: @Sendable (String) -> [String]
         public var agentProgram: @Sendable (String) -> String?
+        public var bundleID: @Sendable (String) -> String? = { Uninstaller.bundleID($0) }
+        /// Where a symlink points, fully resolved; nil when it isn't one.
+        public var linkTarget: @Sendable (String) -> String? = { p in
+            DiskSizer.isSymlink(p) ? URL(fileURLWithPath: p).resolvingSymlinksInPath().path : nil
+        }
 
         public static let disk = FileView(exists: { DiskSizer.exists($0) }, isDirectory: { DiskSizer.isDirectory($0) },
                                           isSymlink: { DiskSizer.isSymlink($0) }, children: { DiskSizer.children($0) },
@@ -281,40 +334,75 @@ public enum Uninstaller {
             let a = all, k = kids
             return FileView(exists: { a.contains($0.lowercased()) }, isDirectory: { k[$0.lowercased()] != nil || !$0.contains(".") },
                             isSymlink: { _ in false }, children: { Array(k[$0.lowercased()] ?? []).sorted() },
-                            agentProgram: { _ in nil })
+                            agentProgram: { _ in nil }, bundleID: { _ in nil }, linkTarget: { _ in nil })
         }
     }
 
     public static func leftovers(for app: InstalledApp, apps: [InstalledApp]? = nil) -> [String] {
-        leftovers(for: app, fs: FileView.disk.memoized(), otherIDs: othersIDs(excluding: app.path, apps: apps ?? installedApps()))
+        let all = apps ?? installedApps()
+        return leftovers(for: app, fs: FileView.disk.memoized(), otherIDs: othersIDs(excluding: app.path, apps: all),
+                         otherNames: Set(all.filter { $0.path != app.path }.map { $0.name.lowercased() }))
     }
 
     /// Other apps' IDs, and helpers that other apps also carry (Microsoft's error reporter ships in every
     /// Office app): they belong to someone else.
     static func othersIDs(excluding path: String, apps: [InstalledApp]) -> Set<String> {
+        loadOwnedCache()
         let owned = Locked([[String]](repeating: [], count: apps.count))
+        let missed = Locked(false)
         DispatchQueue.concurrentPerform(iterations: apps.count) { i in
             guard apps[i].path != path else { return }
-            let ids = ownedIDs(apps[i])
+            let (ids, hit) = ownedIDs(apps[i])
             owned.mutate { $0[i] = ids }
+            if !hit { missed.mutate { $0 = true } }
         }
+        if missed.value { saveOwnedCache() }
         return Set(owned.value.joined())
     }
 
-    /// An app's own ID and its helpers' IDs, lower-cased. Kept until the app's Info.plist changes (an update).
-    static let ownedCache = Locked([String: (Date, [String])]())
-    static func ownedIDs(_ app: InstalledApp) -> [String] {
-        let stamp = (try? FileManager.default.attributesOfItem(atPath: app.path + "/Contents/Info.plist")[.modificationDate] as? Date) ?? .distantPast
-        if let hit = ownedCache.value[app.path], hit.0 == stamp { return hit.1 }
+    /// An app's own ID and its helpers' IDs, lower-cased. Saved to disk and kept until the app changes:
+    /// a replaced bundle (new inode) or a changed Info.plist or Contents folder.
+    struct OwnedEntry: Codable { var stamp: String; var ids: [String] }
+    static let ownedCache = Locked([String: OwnedEntry]())
+    static let ownedLoaded = Locked(false)
+    static var ownedCacheURL: URL { Store.directory.appendingPathComponent("helper-ids.json") }
+
+    static func loadOwnedCache() {
+        guard !ownedLoaded.value else { return }
+        ownedLoaded.mutate { $0 = true }
+        guard let d = try? Data(contentsOf: ownedCacheURL),
+              let saved = try? JSONDecoder().decode([String: OwnedEntry].self, from: d) else { return }
+        ownedCache.mutate { cur in cur.merge(saved) { new, _ in new } }
+    }
+
+    static func saveOwnedCache() {
+        try? FileManager.default.createDirectory(at: Store.directory, withIntermediateDirectories: true)
+        try? JSONEncoder().encode(ownedCache.value).write(to: ownedCacheURL, options: .atomic)
+    }
+
+    /// Bump when embeddedIDs changes what it reads, so saved answers from older rules are dropped.
+    static let ownedRules = "2|" + sharedHelperPrefixes.joined(separator: ",")
+
+    static func appStamp(_ path: String) -> String {
+        func st(_ p: String) -> stat? { var s = stat(); return lstat(p, &s) == 0 ? s : nil }
+        let a = st(path), c = st(path + "/Contents"), i = st(path + "/Contents/Info.plist")
+        return "\(ownedRules)|\(a?.st_ino ?? 0)-\(c?.st_mtimespec.tv_sec ?? 0)-\(i?.st_mtimespec.tv_sec ?? 0).\(i?.st_mtimespec.tv_nsec ?? 0)-\(i?.st_size ?? 0)"
+    }
+
+    static func ownedIDs(_ app: InstalledApp) -> (ids: [String], cached: Bool) {
+        let stamp = appStamp(app.path)
+        if let hit = ownedCache.value[app.path], hit.stamp == stamp { return (hit.ids, true) }
         let ids = ([app.bundleID].compactMap { $0 } + embeddedIDs(app.path, primary: app.bundleID ?? "", fs: .disk)).map { $0.lowercased() }
-        ownedCache.mutate { $0[app.path] = (stamp, ids) }
-        return ids
+        ownedCache.mutate { $0[app.path] = OwnedEntry(stamp: stamp, ids: ids) }
+        return (ids, false)
     }
 
     /// Visible entries only: dotfiles inside Library folders are never an app's leftovers.
     static func fsKids(_ fs: FileView, _ dir: String) -> [String] { fs.children(dir).filter { !$0.lastComponent.hasPrefix(".") } }
 
-    public static func leftovers(for app: InstalledApp, fs: FileView, otherIDs: Set<String> = []) -> [String] {
+    /// `otherNames`: other installed apps' names. A folder named exactly like another app is that app's
+    /// (Application Support/Gemini is Gemini's, not "Gemini 2"'s).
+    public static func leftovers(for app: InstalledApp, fs: FileView, otherIDs: Set<String> = [], otherNames: Set<String> = []) -> [String] {
         let otherIDs = otherIDs.subtracting([app.bundleID?.lowercased() ?? ""])
         var found: [String] = []
         var seen = Set<String>()
@@ -323,7 +411,7 @@ public enum Uninstaller {
             let s = realCase((p as NSString).standardizingPath, fs)
             guard seen.insert(s.lowercased()).inserted else { return }
             guard s != home, !sharedRoots.contains(s), s.parentPath != home || s.lastComponent.hasPrefix("."),
-                  !isLibraryRoot(s), !isNamesakeCLI(s), !s.contains("/Application Support/Steam"),
+                  !isLibraryRoot(s), !isNamesakeCLI(s), !isOtherCLI(s, of: app, fs), !s.contains("/Application Support/Steam"),
                   fs.exists(s), !fs.isSymlink(s), !found.contains(s) else { return }
             found.append(s)
         }
@@ -339,11 +427,16 @@ public enum Uninstaller {
             for c in cased where !variants.cased.contains(c) { variants.cased.append(c) }
             if !variants.lower.contains(leaf.lowercased()) { variants.lower.append(leaf.lowercased()) }
         }
+        let own = name.lowercased()
+        func mine(_ v: String) -> Bool { v.lowercased() == own || !otherNames.contains(v.lowercased()) }
+        variants = (variants.cased.filter(mine), variants.lower.filter(mine), variants.slug.filter { mine($0) && !otherNames.contains($0.replacingOccurrences(of: "-", with: " ")) })
 
-        // Name-based places. Names shorter than 3 letters or too generic would match other apps' folders.
-        if name.count >= 3, !commonNames.contains(name.lowercased()) {
+        // Name-based places. Names shorter than 3 letters or too generic would match other apps' folders;
+        // two Chinese or Japanese characters (幕布, 抖音) already name one app.
+        let wide = name.unicodeScalars.contains { $0.value >= 0x2E80 }
+        if name.count >= 3 || (wide && name.count >= 2), !commonNames.contains(name.lowercased()) {
             for n in variants.cased {
-                for p in ["\(lib)/Application Support/\(n)", "\(lib)/Caches/\(n)", "\(lib)/Logs/\(n)", "\(lib)/Preferences/\(n).plist",
+                for p in ["\(lib)/Application Support/\(n)", "\(lib)/Caches/\(n)", "\(lib)/Logs/\(n)", "\(lib)/Caches/SentryCrash/\(n)", "\(lib)/Preferences/\(n).plist",
                           "\(lib)/Preferences/\(n)", "\(lib)/Saved Application State/\(n).savedState"] { add(p) }
             }
             for n in variants.lower {
@@ -386,10 +479,14 @@ public enum Uninstaller {
                     for d in fsKids(fs, root) {
                         var leaf = d.lastComponent
                         for ext in [".plist", ".savedState", ".binarycookies"] where leaf.hasSuffix(ext) { leaf = String(leaf.dropLast(ext.count)) }
+                        guard !otherIDs.contains(leaf.lowercased()) else { continue }
                         if leaf.lowercased() == family.lowercased() || leaf.lowercased().range(of: "^" + NSRegularExpression.escapedPattern(for: family.lowercased()) + "[0-9]+$", options: .regularExpression) != nil { add(d) }
                     }
                 }
             }
+            // Hidden backups named by the ID (Raycast's ~/Library/Application Support/.com.raycast.macos.backups).
+            for d in fs.children("\(lib)/Application Support") where d.lastComponent.lowercased().hasPrefix("." + id.lowercased() + ".")
+                || d.lastComponent.lowercased() == "." + id.lowercased() { add(d) }
             // Per-machine preferences: <id>.<host-uuid>.plist.
             for f in fsKids(fs, "\(lib)/Preferences/ByHost") where startsWithID(f.lastComponent, id) { add(f) }
             let recents = "\(lib)/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
@@ -611,6 +708,23 @@ public enum Uninstaller {
         return [home, home + "/.config", home + "/.local/share", home + "/.cache"].contains(p.parentPath)
     }
 
+    /// A folder named after a command-line tool you installed separately: ~/.config/reference and ~/Library/Logs/reference
+    /// belong to Homebrew's `reference`, not to reference.app. A tool that links back into the app (VS Code's `code`) is the app's own.
+    static let cliBins = ["/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.cargo/bin", "~/go/bin", "~/.bun/bin"]
+    static func isOtherCLI(_ p: String, of app: InstalledApp, _ fs: FileView) -> Bool {
+        let parents = [home, home + "/.config", home + "/.cache", home + "/.local/share", home + "/.local/state", lib + "/Logs"]
+        guard parents.contains(p.parentPath) else { return false }
+        let leaf = p.lastComponent.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard leaf.count >= 2 else { return false }
+        for bin in cliBins {
+            let tool = (bin.hasPrefix("~") ? home + bin.dropFirst() : bin) + "/" + leaf
+            guard fs.exists(tool) else { continue }
+            let target = fs.linkTarget(tool) ?? tool
+            if !target.hasPrefix(app.path + "/") { return true }
+        }
+        return false
+    }
+
     /// Bundle IDs of extensions, XPC services and helper apps inside the app. Only the folders where
     /// macOS looks for them are read (a full walk of Xcode or Office takes minutes), two levels deep.
     static func embeddedIDs(_ app: String, primary: String, fs: FileView) -> [String] {
@@ -628,12 +742,18 @@ public enum Uninstaller {
         while !queue.isEmpty, read < 128 {
             let (root, depth) = queue.removeFirst()
             read += 1
-            if let sub = bundleID(root), isReverseDNS(sub), sub != primary,
-               !sub.hasPrefix("org.sparkle-project."), !sub.lowercased().hasPrefix("org.python.") { ids.insert(sub) }
+            if let sub = fs.bundleID(root), isReverseDNS(sub), sub != primary, !isSharedHelper(sub) { ids.insert(sub) }
             if depth < 2 { queue += bundles(in: root + "/Contents").map { ($0, depth + 1) } }
         }
         return ids.sorted()
     }
+
+    /// Helpers a vendor ships inside many apps and runs for all of them (Google's updater, Microsoft AutoUpdate
+    /// and error reporting, Edge WebView, Sparkle, Python). Uninstalling one app never takes their files.
+    static let sharedHelperPrefixes = ["org.sparkle-project.", "org.python.", "com.google.googleupdater", "com.google.keystone",
+                                       "com.microsoft.autoupdate", "com.microsoft.errorreporting", "com.microsoft.openxml.",
+                                       "com.microsoft.edgewebview2", "com.microsoft.edgemac.wdgexplorer"]
+    static func isSharedHelper(_ id: String) -> Bool { let l = id.lowercased(); return sharedHelperPrefixes.contains { l.hasPrefix($0) } }
 
     static func bundleID(_ bundle: String) -> String? {
         (NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist")?["CFBundleIdentifier"] as? String)
@@ -672,6 +792,9 @@ public enum Uninstaller {
                 let f = Finding(path: item.path, title: r.title, category: .apps, safety: .check, reason: "", usedFor: "", action: .trash, layer: .full)
                 if let why = SafetyGuard.refusal(for: f, allowActiveProjects: false) {
                     r.message = "Skipped: \(why)"
+                } else if item.locked != nil || !Credentials.find(in: item.path, limit: 1, failSafe: item.kind == .data).isEmpty {
+                    // Checked again at the last moment: nothing holding sign-ins or keys goes, whatever was ticked.
+                    r.message = "Skipped: holds sign-ins or keys."
                 } else {
                     if item.kind == .agent { _ = Shell.run(["launchctl", "bootout", "gui/\(getuid())", item.path], timeout: 10) }
                     (r.ok, r.message, r.trashedTo) = Cleaner.trash(item.path)
