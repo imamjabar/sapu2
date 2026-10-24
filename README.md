@@ -76,7 +76,10 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - **Agent worktrees:** full checkouts the Codex app (`~/.codex/worktrees`) and Claude Code (`<project>/.claude/worktrees`) leave behind. Never preselected; a worktree with uncommitted changes or used in the last three days is locked.
 - **Older JetBrains versions:** settings folders of IDE versions you upgraded from (`GoLand2024.3` when `GoLand2025.2` exists). Toolbox and the newest version stay.
 - **Codex server releases** other than the newest, Codex plugin caches, WeChat's built-in browser and mini-program caches, Feishu/Lark and DingTalk caches.
-- **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models are listed so the space is explained, but only their own app removes them.
+- **Older simulator runtimes:** with Xcode installed, every iOS/watchOS/tvOS/visionOS simulator runtime except the newest per platform, removed with `xcrun simctl runtime delete`. Without Xcode, leftover images are only shown.
+- **Old pnpm store layouts:** `store/v3` left behind after pnpm 10 moved to `store/v10`. Never preselected (a project may still pin an older pnpm); the current store is pruned with `pnpm store prune`.
+- **Instruments recordings:** `.trace` bundles inside your projects. Recordings from the last week are locked.
+- **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models, and macOS aerial wallpaper videos are listed so the space is explained, but only their own app removes them.
 
 Home has a short **What's safe to delete?** guide: caches rebuild themselves, build folders come back with one command, logs are emptied, and your files are never ticked for you.
 

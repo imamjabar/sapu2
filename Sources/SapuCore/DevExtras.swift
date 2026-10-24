@@ -23,14 +23,19 @@ public enum DevExtras {
     static let day: TimeInterval = 86_400
 
     /// Every candidate under `home`. `projects` are project roots from the last scan (for `.claude/worktrees`).
+    /// `system` prefixes the few read-only locations outside the home folder (tests point it at a fake root).
     public static func candidates(home: String = NSHomeDirectory(), projects: [String] = [], now: Date = Date(),
+                                  system: String = "", simRuntimes: () -> Data? = DevExtras.simctlRuntimes,
                                   gitClean: (String) -> Bool? = DevExtras.gitClean) -> [Candidate] {
         claudeJobs(home: home, now: now)
             + agentWorktrees(home: home, projects: projects, now: now, gitClean: gitClean)
             + jetbrainsOldVersions(home: home)
             + codexOldReleases(home: home)
             + chatAppCaches(home: home)
-            + manageSeparately(home: home)
+            + pnpmStores(home: home)
+            + simulatorRuntimes(json: simRuntimes(), system: system)
+            + instrumentsTraces(home: home, projects: projects, now: now)
+            + manageSeparately(home: home, system: system)
     }
 
     // MARK: Claude Code jobs
@@ -193,10 +198,118 @@ public enum DevExtras {
         return out
     }
 
+    // MARK: pnpm
+
+    /// pnpm keeps its store in a folder per layout version (`v3` for pnpm 7–9, `v10` for pnpm 10). After an
+    /// upgrade the older folder is no longer read, unless a project still pins an older pnpm. The newest
+    /// folder is pruned with pnpm itself.
+    static func pnpmStores(home: String) -> [Candidate] {
+        var out: [Candidate] = []
+        for root in ["/Library/pnpm/store", "/.local/share/pnpm/store", "/.pnpm-store"].map({ home + $0 })
+        where DiskSizer.isDirectory(root) && !DiskSizer.isSymlink(root) {
+            let versions = DiskSizer.children(root, includeHidden: false)
+                .compactMap { p -> (String, Int)? in
+                    let n = p.lastComponent
+                    guard n.hasPrefix("v"), let v = Int(n.dropFirst()), DiskSizer.isDirectory(p), !DiskSizer.isSymlink(p) else { return nil }
+                    return (p, v)
+                }
+                .sorted { $0.1 < $1.1 }
+            let current = versions.last
+            out.append(Candidate(path: current?.0 ?? root, title: "pnpm store", category: .devCaches, safety: .check,
+                                 reason: "Content-addressed store shared by all pnpm projects; projects hard-link into it.",
+                                 usedFor: "pnpm installs.", owner: "pnpm",
+                                 rebuild: "Prune only removes packages no project references.", action: .command("pnpm store prune")))
+            for old in versions.dropLast() {
+                out.append(Candidate(path: old.0, title: "Old pnpm store (\(old.0.lastComponent))", category: .devCaches, safety: .check,
+                                     reason: "Packages saved by an earlier pnpm. pnpm now keeps them in \(current!.0.lastComponent), so this copy is no longer read.",
+                                     usedFor: "Only projects that still pin an older pnpm (packageManager in package.json).", owner: "pnpm",
+                                     rebuild: "Those projects download their packages again on the next pnpm install.", action: .trash,
+                                     whileRunning: ["pnpm"]))
+            }
+        }
+        return out
+    }
+
+    // MARK: Simulator runtimes
+
+    /// `xcrun simctl runtime list -j`, or nil without Xcode (Command Line Tools have no simctl).
+    public static func simctlRuntimes() -> Data? {
+        let r = Shell.run(["xcrun", "simctl", "runtime", "list", "-j"], timeout: 20)
+        guard r.status == 0, r.out.hasPrefix("{") else { return nil }
+        return Data(r.out.utf8)
+    }
+
+    /// iOS, watchOS, tvOS and visionOS simulator runtimes are disk images of 5–20 GB each, stored outside the
+    /// home folder. The newest one per platform stays; older ones are removed with simctl, Apple's own tool.
+    /// Without Xcode, leftover images are only shown.
+    static func simulatorRuntimes(json: Data?, system: String) -> [Candidate] {
+        guard let json, let all = (try? JSONSerialization.jsonObject(with: json)) as? [String: [String: Any]] else {
+            let dir = system + "/Library/Developer/CoreSimulator"
+            return ["/Images", "/Volumes"].map { dir + $0 }.filter { DiskSizer.isDirectory($0) && !DiskSizer.isSymlink($0) }.map { p in
+                Candidate(path: p, title: "Simulator runtimes (\(p.lastComponent.lowercased()))", category: .xcode, safety: .yours,
+                          reason: "Disk images of iOS and other simulator systems, stored outside your home folder.",
+                          usedFor: "Running apps in the Simulator.", owner: "Xcode",
+                          rebuild: "Remove them in Xcode › Settings › Components. Without Xcode installed, Apple's tool to remove them is missing, so Sapu only shows them.",
+                          action: .none)
+            }
+        }
+        struct Runtime { var id: String, platform: String, version: [Int], label: String, path: String, deletable: Bool }
+        let runtimes: [Runtime] = all.values.compactMap { r in
+            guard let id = r["identifier"] as? String, let path = (r["path"] as? String) ?? (r["mountPath"] as? String) else { return nil }
+            let version = (r["version"] as? String) ?? ""
+            let platform = (r["platformIdentifier"] as? String) ?? (r["runtimeIdentifier"] as? String) ?? ""
+            let name = platform.split(separator: ".").last.map { $0.replacingOccurrences(of: "simulator", with: "") } ?? "simulator"
+            let label = ["iphone": "iOS", "watch": "watchOS", "appletv": "tvOS", "xr": "visionOS"][name.lowercased()] ?? name
+            return Runtime(id: id, platform: platform, version: version.split(separator: ".").compactMap { Int($0) },
+                           label: "\(label) \(version)", path: system + path, deletable: (r["deletable"] as? Bool) ?? false)
+        }
+        var out: [Candidate] = []
+        for (_, group) in Dictionary(grouping: runtimes, by: \.platform) {
+            let sorted = group.sorted { $0.version.lexicographicallyPrecedes($1.version) }
+            let newest = sorted.last!
+            for r in sorted.dropLast() where r.deletable {
+                out.append(Candidate(path: r.path, title: "Simulator runtime \(r.label)", category: .xcode, safety: .check,
+                                     reason: "An older simulator system. \(newest.label) is the newest one installed and stays.",
+                                     usedFor: "Testing apps on \(r.label) in the Simulator.", owner: "Xcode",
+                                     rebuild: "Download it again in Xcode › Settings › Components if you need to test on it.",
+                                     action: .command("xcrun simctl runtime delete \(r.id)"), whileRunning: ["Simulator"]))
+            }
+        }
+        return out.sorted { $0.title < $1.title }
+    }
+
+    // MARK: Instruments
+
+    /// Instruments and `xctrace record` save each recording as a `.trace` bundle, often hundreds of MB, wherever
+    /// you were working. Looked for in project folders, plus Desktop and Documents when projects already live there
+    /// (so the scan asks for no new folder access). Recordings from the last week are locked.
+    static func instrumentsTraces(home: String, projects: [String], now: Date) -> [Candidate] {
+        var roots = Set(projects)
+        for d in ["Desktop", "Documents"] where projects.contains(where: { $0.hasPrefix(home + "/" + d + "/") }) { roots.insert(home + "/" + d) }
+        let skip: Set<String> = ["node_modules", ".git", "Library", ".venv", "venv", "build", "DerivedData", "Pods", "target"]
+        var found = Set<String>()
+        func walk(_ dir: String, _ depth: Int) {
+            for c in DiskSizer.children(dir, includeHidden: false) where DiskSizer.isDirectory(c) && !DiskSizer.isSymlink(c) {
+                if c.hasSuffix(".trace") { found.insert(c); continue }
+                if depth < 3, !skip.contains(c.lastComponent), !c.hasSuffix(".app"), !c.hasSuffix(".xcodeproj") { walk(c, depth + 1) }
+            }
+        }
+        for r in roots where DiskSizer.isDirectory(r) { walk(r, 0) }
+        return found.sorted().map { p in
+            let date = (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date
+            let recent = date.map { now.timeIntervalSince($0) < 7 * day } ?? true
+            return Candidate(path: p, title: "Instruments recording \(p.lastComponent)", category: .xcode, safety: .check,
+                             reason: "A performance recording from Instruments or xctrace\(date.map { ", saved \(Format.age($0, now: now))" } ?? "").",
+                             usedFor: "Looking back at that profiling session.", owner: "Instruments",
+                             rebuild: "Cannot be rebuilt; record again if you need it.", action: .trash,
+                             lockedReason: recent ? "Recorded in the last week." : nil, whileRunning: ["Instruments"])
+        }
+    }
+
     // MARK: Manage separately
 
     /// Big data that only its own app can remove correctly (a VM disk, a model library). Explained, never cleaned.
-    static func manageSeparately(home: String) -> [Candidate] {
+    static func manageSeparately(home: String, system: String) -> [Candidate] {
         let items: [(String, String, Category, String, String, String)] = [
             ("/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data", "OrbStack disk", .containers, "OrbStack",
              "One disk holding every OrbStack container, image, volume and Linux machine.",
@@ -215,12 +328,22 @@ public enum DevExtras {
             ("/Documents/ComfyUI/models", "ComfyUI models", .ml, "ComfyUI", "Checkpoints, LoRAs and other models used by ComfyUI.",
              "Remove models you no longer use from ComfyUI's model manager or this folder."),
         ]
-        return items.compactMap { i in
+        var out: [Candidate] = items.compactMap { i in
             let p = home + i.0
             guard DiskSizer.isDirectory(p), !DiskSizer.isSymlink(p) else { return nil }
             return Candidate(path: p, title: i.1, category: i.2, safety: .yours, reason: i.4,
                              usedFor: "\(i.3). Manage it there.", owner: i.3, rebuild: i.5, action: .none)
         }
+        // Aerial wallpapers and screen savers live outside the home folder and belong to macOS.
+        let aerials = system + "/Library/Application Support/com.apple.idleassetsd/Customer"
+        if DiskSizer.isDirectory(aerials), !DiskSizer.isSymlink(aerials) {
+            out.append(Candidate(path: aerials, title: "Aerial wallpaper videos", category: .system, safety: .yours,
+                                 reason: "Videos macOS downloaded for aerial wallpapers and screen savers. They sit outside your home folder and need admin rights to remove.",
+                                 usedFor: "macOS. Manage it in System Settings.", owner: "macOS",
+                                 rebuild: "Choose a still wallpaper and screen saver in System Settings so macOS stops downloading more; macOS downloads them again if you switch back.",
+                                 action: .none))
+        }
+        return out
     }
 }
 
