@@ -254,7 +254,18 @@ func selftest() -> Int32 {
     put("Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/p1/Cache/a")
     put("Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/p1/IndexedDB/a")
     put("Library/Application Support/Claude/vm_bundles/claudevm.bundle/disk")
-    let dc = DevExtras.candidates(home: dh, now: Date(), gitClean: { $0.contains("ab12") })
+    for v in ["v3", "v10"] { put("Library/pnpm/store/\(v)/files/00/a") }
+    put("Code/app/package.json"); put("Code/app/perf/Launch_old.trace/x"); put("Code/app/perf/Launch_new.trace/x")
+    try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -30 * 86_400)], ofItemAtPath: dh + "/Code/app/perf/Launch_old.trace")
+    put("sys/Library/Application Support/com.apple.idleassetsd/Customer/4KSDR/a.mov")
+    for r in ["iOS-17-0", "iOS-18-2", "watchOS-10-0"] { put("sys/Library/Developer/CoreSimulator/Images/\(r).dmg") }
+    let simJSON = #"""
+    {"A":{"identifier":"A","version":"17.0","platformIdentifier":"com.apple.platform.iphonesimulator","path":"/Library/Developer/CoreSimulator/Images/iOS-17-0.dmg","deletable":true},
+     "B":{"identifier":"B","version":"18.2","platformIdentifier":"com.apple.platform.iphonesimulator","path":"/Library/Developer/CoreSimulator/Images/iOS-18-2.dmg","deletable":true},
+     "C":{"identifier":"C","version":"10.0","platformIdentifier":"com.apple.platform.watchsimulator","path":"/Library/Developer/CoreSimulator/Images/watchOS-10-0.dmg","deletable":true}}
+    """#
+    let dc = DevExtras.candidates(home: dh, projects: [dh + "/Code/app"], now: Date(), system: dh + "/sys",
+                                  simRuntimes: { Data(simJSON.utf8) }, gitClean: { $0.contains("ab12") })
     let dp = Set(dc.map { String($0.path.dropFirst(dh.count + 1)) })
     check(dp.contains(".claude/jobs/done1/tmp") && !dp.contains(".claude/jobs/run1/tmp") && !dp.contains(".claude/jobs/pin1/tmp"),
           "dev: finished Claude Code jobs' files listed; running and pinned jobs stay")
@@ -268,6 +279,22 @@ func selftest() -> Int32 {
     let vm = dc.first { $0.path.hasSuffix("vm_bundles") }
     check(vm?.action == CleanAction.none && vm?.safety == Safety.yours,
           "dev: Claude's VM is explained under manage separately, never cleaned")
+    let pn = dc.filter { $0.owner == "pnpm" }
+    check(pn.count == 2 && pn.contains { $0.path.hasSuffix("store/v10") && $0.action == CleanAction.command("pnpm store prune") }
+          && pn.contains { $0.path.hasSuffix("store/v3") && $0.action == CleanAction.trash && $0.safety == Safety.check },
+          "dev: pnpm store pruned with pnpm; an older store layout (v3) listed apart, never preselected")
+    let sims = dc.filter { $0.title.hasPrefix("Simulator runtime") }
+    check(sims.count == 1 && sims[0].title.contains("iOS 17.0") && sims[0].action == CleanAction.command("xcrun simctl runtime delete A"),
+          "dev: only older simulator runtimes listed, removed with simctl; newest per platform stays")
+    let noXcode = DevExtras.candidates(home: dh, now: Date(), system: dh + "/sys", simRuntimes: { nil }, gitClean: { _ in true })
+    check(noXcode.contains { $0.path.hasSuffix("CoreSimulator/Images") && $0.action == CleanAction.none },
+          "dev: without Xcode, simulator images are only shown")
+    let traces = dc.filter { $0.owner == "Instruments" }
+    check(traces.count == 2 && traces.first { $0.path.contains("Launch_new") }?.lockedReason != nil
+          && traces.first { $0.path.contains("Launch_old") }?.lockedReason == nil,
+          "dev: Instruments recordings in projects listed; ones from the last week locked")
+    check(dc.contains { $0.title == "Aerial wallpaper videos" && $0.action == CleanAction.none },
+          "dev: aerial wallpaper videos explained, never cleaned (outside home)")
 
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
