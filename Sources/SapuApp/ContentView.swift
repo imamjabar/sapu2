@@ -115,7 +115,7 @@ struct Sidebar: View {
                 Text("\(model.snapshot.projects.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
         case .security:
-            let n = model.versions.filter { $0.level == .eol || $0.level == .outdated }.count
+            let n = model.versions.filter { $0.level == .eol || $0.level == .outdated }.count + model.securityIssues.filter { $0.level != .info }.count
             if n > 0 {
                 Text("\(n)").font(.caption.weight(.bold).monospacedDigit()).foregroundStyle(.white)
                     .padding(.horizontal, 6).padding(.vertical, 1)

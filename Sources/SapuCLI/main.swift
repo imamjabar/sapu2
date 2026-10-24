@@ -237,6 +237,63 @@ func selftest() -> Int32 {
     check(profs == ["", "/Default", "/User Data", "/Partitions/notion", "/Partitions/x", "/User Data/Profile 1"],
           "scan: Electron profiles found in Partitions, Default and User Data (\(profs.sorted()))")
 
+    // Agents, IDEs and chat apps (reference 1.18's developer and AI cleanup), on a fake home.
+    let dh = root + "/DevHome"
+    let old = "2026-01-01T00:00:00.000Z"
+    func put(_ f: String, _ text: String = "x") {
+        try? fm.createDirectory(atPath: (dh + "/" + f as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        fm.createFile(atPath: dh + "/" + f, contents: Data(text.utf8))
+    }
+    put(".claude/jobs/done1/tmp/r1.png"); put(".claude/jobs/done1/state.json", #"{"state":"done","name":"Deck","lastTerminalAt":"\#(old)"}"#)
+    put(".claude/jobs/run1/tmp/a"); put(".claude/jobs/run1/state.json", #"{"state":"running","updatedAt":"\#(old)"}"#)
+    put(".claude/jobs/pin1/tmp/a"); put(".claude/jobs/pin1/state.json", #"{"state":"done","updatedAt":"\#(old)"}"#)
+    put(".claude/jobs/pins.json", #"["pin1"]"#)
+    for v in ["GoLand2024.3", "GoLand2025.2", "PyCharm2025.1", "consentOptions", "Toolbox"] { put("Library/Application Support/JetBrains/\(v)/x") }
+    for r in ["0.1.0", "0.2.0"] { put(".codex/packages/app-server-daemon/releases/\(r)/bin") }
+    put(".codex/worktrees/ab12/repo/.git"); put(".codex/worktrees/cd34/repo/.git")
+    put("Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/p1/Cache/a")
+    put("Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/p1/IndexedDB/a")
+    put("Library/Application Support/Claude/vm_bundles/claudevm.bundle/disk")
+    let dc = DevExtras.candidates(home: dh, now: Date(), gitClean: { $0.contains("ab12") })
+    let dp = Set(dc.map { String($0.path.dropFirst(dh.count + 1)) })
+    check(dp.contains(".claude/jobs/done1/tmp") && !dp.contains(".claude/jobs/run1/tmp") && !dp.contains(".claude/jobs/pin1/tmp"),
+          "dev: finished Claude Code jobs' files listed; running and pinned jobs stay")
+    check(dp.contains("Library/Application Support/JetBrains/GoLand2024.3") && !dp.contains { $0.contains("GoLand2025.2") || $0.contains("PyCharm") || $0.contains("Toolbox") || $0.contains("consent") },
+          "dev: only older JetBrains versions are listed, never the newest, unversioned or Toolbox")
+    check(dc.filter { $0.path.contains("app-server-daemon") }.count == 1, "dev: older Codex server releases listed, newest kept")
+    let wt = dc.filter { $0.path.contains("/worktrees/") }
+    check(wt.count == 2 && wt.allSatisfy { $0.safety == Safety.yours } && wt.first { $0.path.contains("cd34") }?.lockedReason != nil,
+          "dev: agent worktrees never preselected; one with uncommitted changes is locked")
+    check(dp.contains { $0.hasSuffix("p1/Cache") } && !dp.contains { $0.contains("IndexedDB") }, "dev: WeChat browser cache listed, its stored data kept")
+    let vm = dc.first { $0.path.hasSuffix("vm_bundles") }
+    check(vm?.action == CleanAction.none && vm?.safety == Safety.yours,
+          "dev: Claude's VM is explained under manage separately, never cleaned")
+
+    check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
+          && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
+          "scan: cache titles read plainly, without profile IDs")
+
+    // Project security: committed env files and keys, tokens in code and remote URLs, unignored env files.
+    let repo = root + "/LeakyRepo"
+    func rput(_ f: String, _ text: String) {
+        try? fm.createDirectory(atPath: (repo + "/" + f as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        fm.createFile(atPath: repo + "/" + f, contents: Data(text.utf8))
+    }
+    rput(".env", "DB_PASSWORD=hunter2"); rput(".env.example", "DB_PASSWORD="); rput("api/.env.local", "X=1")
+    rput("src/config.js", "const k = 'AKIA" + "Q3EGRT7VBN2KXL5M';\nconst ok = 'sk-ant-your_key_here_xxxxxxxxxxxxxxxxxxxxxxxx';\n")
+    rput("deploy/id_rsa", "x"); rput("package.json", "{}"); rput(".gitignore", "api/.env.local\n")
+    rput("docs/fixture.js", "AIza" + String(repeating: "B", count: 35))
+    _ = Shell.run(["git", "init", "-q"], cwd: repo)
+    _ = Shell.run(["git", "add", ".env", ".env.example", "src/config.js", "deploy/id_rsa", "package.json", ".gitignore"], cwd: repo)
+    _ = Shell.run(["git", "remote", "add", "origin", "https://bob:ghp_" + String(repeating: "a", count: 36) + "@github.com/bob/x.git"], cwd: repo)
+    let sec = ProjectSecurity.check(projectPath: repo, name: "LeakyRepo")
+    let byKind = Dictionary(grouping: sec, by: \.kind).mapValues { $0.compactMap(\.file) }
+    check(byKind["env"]?.contains(".env") == true && byKind["env"]?.contains(".env.example") != true && byKind["env"]?.contains("api/.env.local") != true,
+          "security: committed .env flagged; .env.example and an ignored .env.local are fine")
+    check(byKind["key"] == ["deploy/id_rsa"] && byKind["secret"] == ["src/config.js"] && byKind["remote"]?.count == 1 && byKind["lockfile"]?.count == 1,
+          "security: committed key, AWS key in code, token in remote URL and missing lockfile found (\(byKind))")
+    check(!sec.contains { $0.detail.contains("Q3EGRT7VBN2KXL5M") || $0.detail.contains("hunter2") }, "security: secrets are masked, never shown")
+
     // Release-check finds: a separately installed CLI's folders, a vendor-wide updater, an earlier version's files.
     let H = NSHomeDirectory()
     var more = Uninstaller.FileView.simulated([
@@ -376,6 +433,14 @@ case "apps":
         let plan = Uninstaller.plan(for: a, running: running, apps: all, sized: !args.contains("--no-size"))
         print("\(a.name) (\(a.bundleID ?? "no id"))  total \(Format.bytes(plan.totalBytes)), selected \(Format.bytes(plan.selectedBytes))\(plan.blocked.map { "  BLOCKED: \($0)" } ?? "")")
         for i in plan.items { print("  [\(i.selected ? "x" : " ")] \(i.kind.rawValue.padding(toLength: 5, withPad: " ", startingAt: 0)) \(Format.bytes(i.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(i.path.tildePath)\(i.locked != nil ? "  (locked: sign-ins or keys)" : i.holdBack ? "  (kept)" : "")") }
+    }
+case "secrets":
+    // sapu-cli secrets <project…>   offline leak checks: committed .env and keys, tokens in code and remotes
+    for p in args.dropFirst() {
+        let path = (p as NSString).standardizingPath
+        for i in ProjectSecurity.check(projectPath: path, name: path.lastComponent) {
+            print("[\(i.level.rawValue)] \(path.lastComponent): \(i.title)\n    \(i.detail)\n    fix: \(i.fix)")
+        }
     }
 case "creds":
     // sapu-cli creds <path…>   what sign-ins or keys Sapu sees inside each path (read-only)

@@ -117,8 +117,27 @@ struct ProjectDetail: View {
                     }
                 }
                 Divider()
+                let issues = model.securityIssues.filter { $0.projectPath == project.path }
+                HStack {
+                    Text("Secrets & keys").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    if model.checkingSecurity != nil { ProgressView().controlSize(.mini) } else {
+                        Button("Check") { model.checkSecurity(only: project) }.controlSize(.small)
+                    }
+                }
+                if issues.isEmpty {
+                    Text(model.securityChecked == nil ? "Not checked yet. Offline: committed .env files, keys, tokens in code." : "No leaks found.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(issues) { i in
+                    Label { Text(i.title).font(.callout).help(i.fix) } icon: {
+                        Image(systemName: i.level == .danger ? "key.slash" : i.level == .warning ? "exclamationmark.triangle.fill" : "info.circle")
+                            .foregroundStyle(i.level == .danger ? .red : i.level == .warning ? .orange : .secondary)
+                    }
+                }
+                Divider()
                 Text("Dependency vulnerabilities").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text("Runs npm audit / composer audit against the lockfile (needs internet).").font(.caption).foregroundStyle(.secondary)
+                Text("Runs the ecosystem's own audit against the lockfile: npm, pnpm, composer, plus cargo-audit, pip-audit and osv-scanner when installed. Needs internet.").font(.caption).foregroundStyle(.secondary)
                 Button("Run audit") { model.audit(project: project) }.disabled(model.audits[project.path] == "Running…")
                 if let out = model.audits[project.path] { Text(out).font(.caption.monospaced()).textSelection(.enabled) }
                 HStack {

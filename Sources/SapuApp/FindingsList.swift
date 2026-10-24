@@ -14,15 +14,22 @@ struct FindingsList: View {
                 empty
             } else {
                 List(selection: $model.focused) {
-                    ForEach(groups(items), id: \.0) { group in
+                    ForEach(groups(items.filter { $0.action != .none }), id: \.0) { group in
                         SwiftUI.Section {
                             ForEach(group.1) { f in FindingRow(finding: f, maxBytes: maxBytes).tag(f.id) }
                         } header: {
-                            HStack {
-                                Label(group.0.rawValue, systemImage: group.0.symbol).foregroundStyle(section.tint)
-                                    .font(.callout.weight(.semibold))
-                                Spacer()
-                                Text(Format.bytes(group.1.reduce(0) { $0 + $1.bytes })).monospacedDigit()
+                            groupHeader(group.0.rawValue, group.0.symbol, group.1)
+                        }
+                    }
+                    let separate = items.filter { $0.action == .none }
+                    if !separate.isEmpty {
+                        SwiftUI.Section {
+                            ForEach(separate) { f in FindingRow(finding: f, maxBytes: maxBytes).tag(f.id) }
+                        } header: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                groupHeader("Manage in their own app", "arrow.up.forward.app", separate)
+                                Text("Virtual machine disks and model libraries. Only their app removes them correctly, so Sapu explains them and leaves them.")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -32,13 +39,21 @@ struct FindingsList: View {
         }
     }
 
+    private func groupHeader(_ title: String, _ symbol: String, _ items: [Finding]) -> some View {
+        HStack {
+            Label(title, systemImage: symbol).foregroundStyle(section.tint).font(.callout.weight(.semibold))
+            Spacer()
+            Text(Format.bytes(items.reduce(0) { $0 + $1.bytes })).monospacedDigit()
+        }
+    }
+
     private func groups(_ items: [Finding]) -> [(SapuCore.Category, [Finding])] {
         let dict = Dictionary(grouping: items, by: \.category)
         return dict.map { ($0.key, $0.value) }.sorted { $0.1.reduce(0) { $0 + $1.bytes } > $1.1.reduce(0) { $0 + $1.bytes } }
     }
 
     private func header(_ items: [Finding]) -> some View {
-        let total = items.reduce(0) { $0 + $1.bytes }
+        let total = items.filter { $0.action != .none }.reduce(0) { $0 + $1.bytes }
         let safe = items.filter { $0.safety == .safe && model.isSelectable($0) }
         return PaneHeader(pane: section, value: items.isEmpty ? nil : Format.bytes(total), caption: items.isEmpty ? nil : "\(items.count) items") {
             if !safe.isEmpty {
