@@ -91,7 +91,7 @@ struct PlanView: View {
             ("The app", "Moved to the Trash" + (plan.app.caskToken != nil ? " by Homebrew" : "") + ".", items.filter { $0.kind == .app }),
             ("Caches, logs and helpers", "Only useful while the app is installed. Removed with it.", items.filter { ($0.kind == .cache || $0.kind == .agent) }),
             ("Your data for this app", "Settings, documents and accounts. Kept unless you tick them.", items.filter { $0.kind == .data && !$0.holdBack }),
-            ("Kept for safety", "Shared with other apps, or browser profiles and libraries. Tick one only if you are sure.", items.filter(\.holdBack)),
+            ("Kept for safety", "Sign-ins and keys always stay. Shared folders, profiles and libraries: tick one only if you are sure.", items.filter(\.holdBack)),
         ].filter { !$0.2.isEmpty }
     }
 
@@ -173,7 +173,9 @@ struct PlanRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Toggle("", isOn: Binding(get: { item.selected }, set: { _ in model.togglePlanItem(item.id) }))
-                .toggleStyle(.checkbox).labelsHidden().disabled(item.kind == .app)
+                .toggleStyle(.checkbox).labelsHidden().disabled(item.kind == .app || item.locked != nil)
+                .overlay { if item.locked != nil { Image(systemName: "lock.fill").font(.caption2).foregroundStyle(.secondary).offset(x: 14) } }
+                .help(item.locked ?? "")
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.kind == .app ? appName + ".app" : label).lineLimit(1).truncationMode(.middle)
                 Text(item.path.tildePath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).textSelection(.enabled)

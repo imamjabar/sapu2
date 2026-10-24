@@ -10,6 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Package
+        # CI has no Mole: check the saved recording. The live Mole rerun happens before tagging (scripts/release-check.sh).
+        env:
+          SAPU_REPLAY_ONLY: "1"
         run: scripts/package.sh "${GITHUB_REF_NAME#v}"
       - name: Self-test
         run: build/sapu-cli selftest

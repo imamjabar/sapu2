@@ -291,14 +291,14 @@ final class AppModel: ObservableObject {
                 guard self.selectedApp == app.id, let shown = self.plan else { return }
                 var full = sizedPlan
                 let picked = Dictionary(shown.items.map { ($0.path, $0.selected) }, uniquingKeysWith: { a, _ in a })
-                for i in full.items.indices { if let s = picked[full.items[i].path] { full.items[i].selected = s } }
+                for i in full.items.indices where full.items[i].locked == nil { if let s = picked[full.items[i].path] { full.items[i].selected = s } }
                 self.plan = full
             }
         }
     }
 
     func togglePlanItem(_ id: UninstallItem.ID) {
-        guard var p = plan, let i = p.items.firstIndex(where: { $0.id == id }), p.items[i].kind != .app else { return }
+        guard var p = plan, let i = p.items.firstIndex(where: { $0.id == id }), p.items[i].kind != .app, p.items[i].locked == nil else { return }
         p.items[i].selected.toggle()
         plan = p
     }
@@ -306,7 +306,7 @@ final class AppModel: ObservableObject {
     /// Selects or clears every personal-data item (never the held-back ones unless chosen one by one).
     func setPersonalData(_ on: Bool) {
         guard var p = plan else { return }
-        for i in p.items.indices where p.items[i].kind == .data && !p.items[i].holdBack { p.items[i].selected = on }
+        for i in p.items.indices where p.items[i].kind == .data && !p.items[i].holdBack && p.items[i].locked == nil { p.items[i].selected = on }
         plan = p
     }
 

@@ -1,0 +1,66 @@
+#!/bin/bash
+# Release check: "never wrong, and at least everything Mole finds".
+# Reruns Mole's uninstall leftover finder (read-only, the same steps `mo uninstall` previews) for every
+# installed app, re-records what Sapu's finder sees on this Mac into Tests/parity-fixture.json (the hand
+# review in it is kept), then fails if
+#   - Mole finds a path Sapu doesn't, and it isn't on the written Mole-mistakes list,
+#   - Sapu claims a path nobody has reviewed, or
+#   - two apps claim the same path (or one inside the other).
+# `sapu-cli selftest` replays the saved recording, so CI catches regressions without Mole.
+# Usage: scripts/release-check.sh            (about 7 minutes for 60 apps)
+#        scripts/release-check.sh --todo     also print what needs a decision, as JSON
+#        scripts/release-check.sh --tested <cask.json> <tested-apps.txt>
+#            also rerun Mole on Mole's tested apps, all installed side by side in a fake home folder that holds
+#            exactly their Homebrew-documented leftovers (about 35 minutes for 628 apps). cask.json is
+#            https://formulae.brew.sh/api/cask.json; tested-apps.txt lists one app name per line.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MOLE_HOME="$(brew --prefix mole 2>/dev/null)/libexec"
+[ -f "$MOLE_HOME/lib/core/common.sh" ] || { echo "Mole isn't installed (brew install mole)."; exit 2; }
+MOLE_VERSION=$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$(brew --prefix mole)/libexec/mole" 2>/dev/null || true)
+[ -n "$MOLE_VERSION" ] || MOLE_VERSION=$(mo --version 2>/dev/null | awk '/version/{print $3; exit}')
+
+scripts/build.sh release >/dev/null
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+build/sapu-cli apps --no-size > "$WORK/apps.tsv"
+
+# One app's leftovers the way Mole's batch uninstall finds them: find_app_files, the user's crash
+# reports, minus whatever Mole's uninstall protection drops. System folders are out of scope (outside $HOME).
+cat > "$WORK/mole-one.sh" <<'ONE'
+set +eu
+SCRIPT_DIR="$MOLE_HOME"
+source "$SCRIPT_DIR/lib/core/common.sh"
+source "$SCRIPT_DIR/lib/uninstall/batch.sh" 2>/dev/null
+files=$(MOLE_UNINSTALL_SIBLING_SURVIVES=0 find_app_files "$1" "$2" "$3" 2>/dev/null)
+diag=$(get_diagnostic_report_paths_for_app "$3" "$2" "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null)
+printf '%s\n%s\n' "$files" "$diag" | while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  if MOLE_UNINSTALL_MODE=1 should_protect_path "$p" 2>/dev/null; then echo "PROTECTED $p"; else echo "$p"; fi
+done
+ONE
+n=0; total=$(wc -l < "$WORK/apps.tsv" | tr -d ' ')
+while IFS=$'\t' read -r name id _ path; do
+  n=$((n + 1)); printf '\r\033[K  Mole %d/%d  %s' "$n" "$total" "$name" >&2
+  echo "### $name|$id|$path" >> "$WORK/mole.txt"
+  (cd ~ && MOLE_HOME="$MOLE_HOME" nice -n 10 /bin/bash "$WORK/mole-one.sh" "$id" "$name" "$path" </dev/null >> "$WORK/mole.txt" 2>/dev/null)
+done < "$WORK/apps.tsv"
+echo >&2
+
+status=0
+build/sapu-cli parity record "$WORK/mole.txt" --version "${MOLE_VERSION:-?}" || status=$?
+
+if [ "${1:-}" = "--tested" ]; then
+  FAKE="$WORK/tested"; mkdir -p "$FAKE"
+  build/sapu-cli coverage "$2" "$3" --export "$FAKE" >/dev/null
+  n=0; total=$(wc -l < "$FAKE/apps.tsv" | tr -d ' ')
+  while IFS=$'\t' read -r name id _ path; do
+    n=$((n + 1)); printf '\r\033[K  Mole (tested) %d/%d  %s' "$n" "$total" "$name" >&2
+    echo "### $name|$id|$path" >> "$FAKE/mole.txt"
+    (cd "$FAKE/home" && HOME="$FAKE/home" MOLE_HOME="$MOLE_HOME" nice -n 15 /bin/bash "$WORK/mole-one.sh" "$id" "$name" "$path" </dev/null 2>/dev/null \
+      | grep -F "$FAKE/home/" | sed "s#^$FAKE/home#~#; s#^PROTECTED $FAKE/home#PROTECTED ~#" >> "$FAKE/mole.txt")
+  done < "$FAKE/apps.tsv"
+  echo >&2
+  build/sapu-cli tested-record "$FAKE" "$FAKE/mole.txt" --version "${MOLE_VERSION:-?}" || status=$?
+fi
+[ "${1:-}" = "--todo" ] && build/sapu-cli parity todo
+exit $status
