@@ -172,6 +172,12 @@ public struct Project: Codable, Sendable, Identifiable, Hashable {
     public var artifactBytes: Int64
     /// Declared runtime versions, e.g. ["php": "^8.1", "node": "18"].
     public var declared: [String: String]
+
+    /// Old but kept as recent only because of uncommitted changes.
+    public var keptForUncommittedWork: Bool {
+        guard status == .recent, (git?.dirtyFiles ?? 0) > 0, let d = lastActivity else { return false }
+        return Date().timeIntervalSince(d) >= 90 * 86_400
+    }
 }
 
 public struct Insight: Codable, Sendable, Identifiable, Hashable {
@@ -214,6 +220,8 @@ public struct Snapshot: Codable, Sendable {
     public var layerEvents: [Int: UInt64]?
     public var journalID: String?
     public var discoveryCache: [String: DiscoveryUnit]?
+    /// Rules version the discovery cache was built with; a different version means discover again.
+    public var discoveryRules: Int?
     public init() {}
 
     public func findings(in layer: ScanLayer) -> [Finding] { findings.filter { $0.layer == layer } }

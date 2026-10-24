@@ -180,7 +180,7 @@ public final class ScanEngine: @unchecked Sendable {
         snap.sizeCache = cache
         snap.layerEvents = (snap.layerEvents ?? [:]).merging([layer.rawValue: startEventID]) { $1 }
         snap.journalID = ChangeJournal.journalID()
-        if layer == .projects, let d = lastDiscovery, !d.isEmpty { snap.discoveryCache = d }
+        if layer == .projects, let d = lastDiscovery, !d.isEmpty { snap.discoveryCache = d; snap.discoveryRules = ProjectScanner.rulesVersion }
     }
 
     public func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
@@ -244,6 +244,9 @@ public final class ScanEngine: @unchecked Sendable {
         jobs += appCacheJobs(running: running)
         jobs += dotCacheJobs()
         jobs += electronCacheJobs(running: running)
+        jobs += browserCacheJobs(running: running)
+        jobs += toolVersionJobs()
+        jobs += supportCacheJobs(running: running)
 
         let prev = Dictionary((previous?.findings ?? []).map { ($0.path, $0.bytes) }, uniquingKeysWith: max)
         let tracker = ProgressTracker(layer: .quick, phase: "Sizing \(jobs.count) known locations", expected: jobs.map { prev[$0.path] }, sink: progress)
@@ -296,17 +299,153 @@ public final class ScanEngine: @unchecked Sendable {
         for app in apps {
             let base = "~/Library/Application Support/\(app.dir)".expandingTilde
             guard DiskSizer.exists(base) else { continue }
-            for sub in ["Cache", "CachedData", "Code Cache", "GPUCache", "CachedExtensionVSIXs", "Service Worker/CacheStorage"] {
+            for sub in Self.chromiumCacheDirs + ["CachedData", "CachedExtensionVSIXs", "WebStorage"] {
                 let path = base + "/" + sub
                 guard DiskSizer.isDirectory(path) else { continue }
+                // WebStorage holds extension webview state (IndexedDB, local storage), not just cache.
+                let webStorage = sub == "WebStorage"
                 jobs.append(Job(path: path) { r in
                     guard r.bytes >= 50_000_000 else { return nil }
                     let open = running.contains(app.name) || running.contains(app.exe) || running.contains(app.dir)
-                    return Finding(path: path, title: "\(app.name) \(sub)", category: .appCaches, safety: .safe, bytes: r.bytes,
+                    return Finding(path: path, title: "\(app.name) \(sub)", category: .appCaches, safety: webStorage ? .check : .safe,
+                                   bytes: r.bytes, files: r.files, lastModified: r.newestDate,
+                                   reason: webStorage
+                                       ? "Storage used by \(app.name) extension panels and webviews. Mostly cached web data, but some extensions keep settings here."
+                                       : "Electron/Chromium cache of \(app.name): web assets, compiled code and old update data.",
+                                   usedFor: "Speeding up \(app.name).", owner: app.name,
+                                   rebuild: webStorage ? "Extensions recreate it; a few may ask you to sign in again." : "Rebuilt on next launch.",
+                                   action: .trash, lockedReason: open ? "\(app.name) is running. Quit it first." : nil, layer: .quick)
+                })
+            }
+        }
+        return jobs
+    }
+
+    /// Cache folders every Chromium-based app writes, per profile or at the top of its data folder.
+    static let chromiumCacheDirs = ["Cache", "Code Cache", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache",
+                                    "Service Worker/CacheStorage", "Service Worker/ScriptCache"]
+
+    /// Chromium browsers: per-profile caches plus shared shader, component and crash caches.
+    /// Cookies, history, passwords and extensions are never touched (only these named cache folders).
+    private func browserCacheJobs(running: Set<String>) -> [Job] {
+        let support = "~/Library/Application Support".expandingTilde
+        let browsers: [(dir: String, name: String, exe: String)] = [
+            ("Google/Chrome", "Chrome", "Google Chrome"), ("Arc/User Data", "Arc", "Arc"),
+            ("BraveSoftware/Brave-Browser", "Brave", "Brave Browser"), ("Microsoft Edge", "Edge", "Microsoft Edge"),
+            ("Vivaldi", "Vivaldi", "Vivaldi"), ("com.operasoftware.Opera", "Opera", "Opera"),
+        ]
+        let shared = ["GrShaderCache", "ShaderCache", "GraphiteDawnCache", "GPUPersistentCache", "component_crx_cache",
+                      "extensions_crx_cache", "optimization_guide_model_store", "Crashpad/completed"]
+        var jobs: [Job] = []
+        for b in browsers {
+            let base = support + "/" + b.dir
+            guard DiskSizer.isDirectory(base) else { continue }
+            let profiles = DiskSizer.children(base, includeHidden: false).filter {
+                let n = $0.lastComponent
+                return (n == "Default" || n.hasPrefix("Profile ") || n == "Guest Profile") && DiskSizer.isDirectory($0)
+            }
+            var paths = shared.map { base + "/" + $0 }
+            for p in profiles { paths += Self.chromiumCacheDirs.map { p + "/" + $0 } }
+            for path in paths where DiskSizer.isDirectory(path) {
+                let label = String(path.dropFirst(base.count + 1))
+                jobs.append(Job(path: path) { r in
+                    guard r.bytes >= 20_000_000 else { return nil }
+                    let open = running.contains(b.exe) || running.contains(b.name)
+                    return Finding(path: path, title: "\(b.name) \(label)", category: .appCaches, safety: .safe, bytes: r.bytes,
                                    files: r.files, lastModified: r.newestDate,
-                                   reason: "Electron/Chromium cache of \(app.name): web assets, compiled code and old update data.",
-                                   usedFor: "Speeding up \(app.name).", owner: app.name, rebuild: "Rebuilt on next launch.", action: .trash,
-                                   lockedReason: open ? "\(app.name) is running. Quit it first." : nil, layer: .quick)
+                                   reason: "\(b.name) keeps copies of pages, scripts, shaders and downloaded components here. Your logins, history and bookmarks live elsewhere.",
+                                   usedFor: "Loading sites and the browser faster.", owner: b.name,
+                                   rebuild: "Sites refill it as you browse; first loads are a little slower.", action: .trash,
+                                   lockedReason: open ? "\(b.name) is running. Quit it first." : nil, layer: .quick)
+                })
+            }
+        }
+        // Chrome's updater keeps every component and update package it downloaded.
+        let updater = support + "/Google/GoogleUpdater/crx_cache"
+        if DiskSizer.isDirectory(updater) {
+            jobs.append(Job(path: updater) { r in
+                guard r.bytes >= 20_000_000 else { return nil }
+                return Finding(path: updater, title: "Google Updater downloads", category: .appCaches, safety: .safe, bytes: r.bytes,
+                               files: r.files, lastModified: r.newestDate,
+                               reason: "Update packages Google Updater already installed. It keeps them in case it needs to repair Chrome.",
+                               usedFor: "Repairing or re-applying Chrome updates.", owner: "Chrome",
+                               rebuild: "Downloaded again if an update ever needs it.", action: .trash, layer: .quick)
+            })
+        }
+        return jobs
+    }
+
+    /// Old versions of self-updating tools. The version in use and any version a running process uses are kept.
+    private func toolVersionJobs() -> [Job] {
+        var jobs: [Job] = []
+        let processes = Shell.run(["ps", "-axo", "comm="], timeout: 5).out
+        let claude = "~/.local/share/claude/versions".expandingTilde
+        let current = (try? FileManager.default.destinationOfSymbolicLink(atPath: "~/.local/bin/claude".expandingTilde)) ?? ""
+        for v in DiskSizer.children(claude, includeHidden: false) where v != current && !processes.contains(v) {
+            jobs.append(Job(path: v) { r in
+                guard r.bytes >= 20_000_000 else { return nil }
+                return Finding(path: v, title: "Claude Code \(v.lastComponent) (old version)", category: .devCaches, safety: .safe,
+                               bytes: r.bytes, files: r.files, lastModified: r.newestDate,
+                               reason: "Claude Code downloads each new version next to the old ones. You run \(current.lastComponent.isEmpty ? "a newer one" : current.lastComponent).",
+                               usedFor: "Nothing; an older Claude Code release.", owner: "Claude Code",
+                               rebuild: "Not needed.", action: .trash, layer: .quick)
+            })
+        }
+        let pyinstaller = "~/Library/Application Support/pyinstaller".expandingTilde
+        if DiskSizer.isDirectory(pyinstaller) {
+            jobs.append(Job(path: pyinstaller) { r in
+                guard r.bytes >= 20_000_000 else { return nil }
+                return Finding(path: pyinstaller, title: "PyInstaller cache", category: .devCaches, safety: .safe, bytes: r.bytes,
+                               files: r.files, lastModified: r.newestDate,
+                               reason: "Bootloaders and analysed binaries PyInstaller kept from earlier app builds.",
+                               usedFor: "Faster PyInstaller builds.", owner: "PyInstaller",
+                               rebuild: "Recreated on the next build.", action: .trash, layer: .quick)
+            })
+        }
+        // Chrome keeps the previous version inside the app until it restarts. Outside home, so information only.
+        let versions = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions"
+        if let live = try? FileManager.default.destinationOfSymbolicLink(atPath: versions + "/Current") {
+            for v in DiskSizer.children(versions, includeHidden: false) where v.lastComponent != live && v.lastComponent != "Current" {
+                jobs.append(Job(path: v) { r in
+                    guard r.bytes >= 50_000_000 else { return nil }
+                    return Finding(path: v, title: "Chrome \(v.lastComponent) (previous version)", category: .apps, safety: .safe,
+                                   bytes: r.bytes, files: r.files, lastModified: r.newestDate,
+                                   reason: "Chrome updated to \(live) but keeps the old version inside the app until you fully quit and reopen it.",
+                                   usedFor: "Nothing after the update.", owner: "Chrome",
+                                   rebuild: "Quit Chrome (⌘Q) and open it again; Chrome removes this itself.", action: .none, layer: .quick)
+                })
+            }
+        }
+        return jobs
+    }
+
+    /// Cache and log folders apps keep inside their Application Support folder.
+    private func supportCacheJobs(running: Set<String>) -> [Job] {
+        let support = "~/Library/Application Support".expandingTilde
+        // Covered by the Electron and browser rules, or holding data that only looks like a cache.
+        let skip: Set<String> = ["Code", "Cursor", "Slack", "discord", "Microsoft Teams", "Notion", "Antigravity", "Claude",
+                                 "Windsurf", "Google", "Arc", "BraveSoftware", "Microsoft Edge", "Vivaldi", "com.operasoftware.Opera",
+                                 "MobileSync", "Sapu", "CloudDocs", "Knowledge", "AddressBook", "CallHistoryDB", "com.apple.TCC",
+                                 "1Password", "Bitwarden", "Dashlane", "Keeper", "pyinstaller", "JetBrains"]
+        var jobs: [Job] = []
+        for app in DiskSizer.children(support, includeHidden: false) where DiskSizer.isDirectory(app) && !skip.contains(app.lastComponent) {
+            let name = app.lastComponent
+            if name.hasPrefix("com.apple.") { continue }
+            for sub in ["Cache", "Caches", "Code Cache", "GPUCache", "logs", "Logs", "Crashpad/completed"] {
+                let path = app + "/" + sub
+                guard DiskSizer.isDirectory(path), !DiskSizer.isSymlink(path) else { continue }
+                let isLog = sub.lowercased() == "logs"
+                jobs.append(Job(path: path) { r in
+                    guard r.bytes >= 30_000_000 else { return nil }
+                    let pretty = SystemProbe.app(forBundleID: name)?.name ?? (name.contains(".") ? Self.prettyName(name) : name)
+                    let open = running.contains(pretty) || running.contains(name)
+                    return Finding(path: path, title: "\(pretty) \(sub)", category: isLog ? .logs : .appCaches, safety: .safe,
+                                   bytes: r.bytes, files: r.files, lastModified: r.newestDate,
+                                   reason: isLog ? "Diagnostic logs \(pretty) writes in its own data folder. It rarely deletes old ones."
+                                                 : "\(pretty) keeps downloaded and rendered data in its own data folder.",
+                                   usedFor: isLog ? "Troubleshooting \(pretty)." : "Speeding up \(pretty).", owner: pretty,
+                                   rebuild: isLog ? "Not needed." : "\(pretty) refills it as needed.", action: .trash,
+                                   lockedReason: open ? "\(pretty) is running. Quit it first." : nil, layer: .quick)
                 })
             }
         }
@@ -351,7 +490,7 @@ public final class ScanEngine: @unchecked Sendable {
                     self.record(path, r, reused: cached != nil)
                     tracker.finish(i, bytes: r.bytes)
                     return r
-                }, changes: self.currentChanges, discoveryCache: self.currentChanges == nil ? [:] : (previous?.discoveryCache ?? [:]),
+                }, changes: self.currentChanges, discoveryCache: self.currentChanges == nil || previous?.discoveryRules != ProjectScanner.rulesVersion ? [:] : (previous?.discoveryCache ?? [:]),
                    previousProjects: self.currentChanges == nil ? [] : (previous?.projects ?? []))
                 self.lastDiscovery = result.discovery
                 cont.resume(returning: result)
