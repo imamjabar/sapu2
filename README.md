@@ -53,11 +53,42 @@ Sapu groups folders the way IDEs do, so a monorepo or a downloaded example colle
 - **Leftovers:** containers, web data, saved state and settings named after an app that is no longer installed. App extensions of installed apps and Apple's own data are skipped.
 - **Installers:** `.dmg`, `.pkg`, `.iso` and `.xip` files in Downloads and Desktop.
 
+### Uninstall apps
+
+Pick an app and Sapu lists the app plus everything it keeps in your Library before anything moves:
+
+- **Found by bundle ID:** Application Support, Caches, Logs, Preferences (and per-machine ByHost files), Containers, Group Containers, HTTPStorages, WebKit, Cookies, Saved Application State, Application Scripts, recent-documents lists, CloudKit caches.
+- **Found by name:** name variants (`OBS Studio`, `obs-studio`, `ObsStudio`), vendor folders (`Google/Chrome`, exact names only), Electron updater caches, `~/.config`/`~/.cache`/`~/.local/share`, plug-ins, crash reports.
+- **Found by reading the app:** helper extensions, XPC services and login items, and launch agents whose program lives inside the app.
+- **Selection:** caches, logs and background helpers are selected; your settings and data are kept unless you tick them. App groups, browser profiles, game libraries and home dot folders are never preselected.
+- **Never claimed:** shared folders, macOS apps, security agents that need their vendor's uninstaller, and namesake command-line tools (`~/.claude`, `~/.codex`, `~/.ollama`…).
+- **Removal:** everything goes to the Trash (Homebrew apps through `brew uninstall --cask`) and is written to a receipt.
+
+**Tested:**
+
+- On this Mac's 60 apps, Sapu found every leftover path the reference's finder found, plus 16 more.
+- For the 628 apps on the reference's tested-apps list that Homebrew documents, Sapu's rules find 71% of the 3,918 documented leftover paths in a simulated home folder. Most of the remainder belongs to helper apps that Sapu finds by reading the installed app.
+- Run `sapu-cli coverage cask.json names.txt` to reproduce.
+
+### Health and Maintenance
+
+- **Health:**
+  - memory pressure, swap, processor load, disk, battery wear and temperature;
+  - the apps using the most memory and processor, with helpers counted under their app;
+  - plain advice and a 0–100 score.
+- **Maintenance:**
+  - background items whose program is gone;
+  - damaged settings files;
+  - Quick Look refresh, the "Open With" rebuild and `.DS_Store` on shared drives;
+  - unused Homebrew dependencies.
+- **Needs administrator access:** DNS flush and Time Machine snapshot thinning are shown as commands to paste into Terminal.
+
 ### Browsers, tools and build output
 
 - **Browsers** (Chrome, Arc, Brave, Edge, Vivaldi, Opera): only named cache folders per profile (page cache, service-worker cache, GPU and shader caches, downloaded components). Logins, history, bookmarks and extensions are never touched. Locked while the browser runs.
 - **Old tool versions:** Claude Code versions other than the one in use (and any a running process uses), Google Updater's installed packages, the PyInstaller cache. The previous Chrome version inside the app is shown with a hint to restart Chrome; Sapu does not edit files inside apps.
 - **App caches and logs** inside `~/Library/Application Support/<app>`.
+- **Known locations of ~400 apps and tools** (AppCatalog), cross-checked against the locations a reference open-source cleaner cleans. Only paths were used; reference is GPL-3.0 and none of its code or text is included. macOS's own caches are marked "Check first" because rebuilding them costs time and battery.
 - **Build output:** PyInstaller `build`/`dist` (next to a `.spec`), dbt `target`/`dbt_packages`, and renamed dependency folders such as `node_modules-old`, listed as one item. Folders inside a dependency tree are never listed on their own.
 - Projects older than 90 days that are kept only because of uncommitted changes are labelled **Uncommitted work**.
 

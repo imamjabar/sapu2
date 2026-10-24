@@ -27,7 +27,7 @@ public enum SafetyGuard {
 
     static let protectedFragments = [
         "/Library/Keychains", "/Library/Mobile Documents", "/Library/CloudStorage", "/Library/Mail", "/Library/Messages",
-        "/Library/Application Support/MobileSync", "/Library/Photos", "/Library/Safari", "/Library/Cookies",
+        "/Library/Application Support/MobileSync", "/Library/Photos", "/Library/Safari",
         "/Library/Accounts", "/Library/Calendars", "/Library/Group Containers/group.com.apple",
         "/.ssh", "/.gnupg", "/.aws", "/.config/gcloud", "/.kube", "/.docker/config.json",
         ".photoslibrary", "/Library/Application Support/1Password", "/Library/Application Support/Bitwarden",
@@ -44,6 +44,9 @@ public enum SafetyGuard {
         if let lock = f.lockedReason, !(allowActiveProjects && lock.hasPrefix("Active project")) { return lock }
         guard allowedRoots.contains(where: p.hasPrefix) else { return "Outside the folders Sapu may change." }
         if protectedFragments.contains(where: p.contains) { return "Protected location." }
+        // One app's cookie file goes with that app; the Cookies folder and Apple's own stay.
+        if p.contains("/Library/Cookies"), !(p.parentPath == home + "/Library/Cookies" && p.hasSuffix(".binarycookies")
+                                              && !p.lastComponent.hasPrefix("com.apple.")) { return "Protected location." }
         let name = p.lastComponent
         if name.hasPrefix(".env") || secretSuffixes.contains(where: name.hasSuffix) { return "Looks like secrets." }
         if p == home || p.parentPath == home && homeTopLevel.contains(name) { return "Never removes a home folder itself." }

@@ -168,6 +168,33 @@ func selftest() -> Int32 {
     check(kpaths == [kinds + "/old/node_modules-lama", kinds + "/pyapp/build", kinds + "/pyapp/dist", kinds + "/dbt/target"],
           "renamed node_modules is one item; PyInstaller and dbt output found (\(kpaths.count) items)")
 
+    // Uninstaller: finds an app's own files, never a namesake tool's or another product's.
+    let h = NSHomeDirectory(), L = h + "/Library"
+    let vfs = Uninstaller.FileView.simulated([
+        "\(L)/Application Support/Google/Chrome/Default/x", "\(L)/Application Support/Google/Chrome for Testing/x",
+        "\(L)/Caches/com.google.Chrome/x", "\(L)/Group Containers/EQHXZ8M8AV.com.google.Chrome/x",
+        "\(L)/Preferences/com.google.Chrome.plist", "\(L)/Cookies/com.google.Chrome.binarycookies",
+        "\(h)/.claude/settings.json", "\(L)/Application Support/Claude/x", "\(L)/Caches/com.TechSmith.x/y",
+    ])
+    let chrome = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Google Chrome.app", name: "Google Chrome", bundleID: "com.google.Chrome"), fs: vfs)
+    check(chrome.contains("\(L)/Application Support/Google/Chrome") && !chrome.contains { $0.contains("Chrome for Testing") },
+          "uninstall: vendor folder found, Playwright's Chrome for Testing not claimed")
+    check(chrome.contains("\(L)/Caches/com.google.Chrome") && chrome.contains("\(L)/Group Containers/EQHXZ8M8AV.com.google.Chrome")
+          && chrome.contains("\(L)/Cookies/com.google.Chrome.binarycookies"), "uninstall: cache, app group and cookies found")
+    let claude = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Claude.app", name: "Claude", bundleID: "com.anthropic.claudefordesktop"), fs: vfs)
+    check(claude.contains("\(L)/Application Support/Claude") && !claude.contains("\(h)/.claude"), "uninstall: never claims Claude Code's ~/.claude")
+    check(Uninstaller.holdBack("\(L)/Group Containers/EQHXZ8M8AV.com.google.Chrome") && Uninstaller.holdBack("\(L)/Application Support/Google/Chrome")
+          && Uninstaller.classify("\(L)/Caches/com.google.Chrome") == .cache && Uninstaller.classify("\(L)/Preferences/com.google.Chrome.plist") == .data,
+          "uninstall: caches preselected, data kept, profiles and app groups held back")
+    let sys = InstalledApp(path: "/System/Applications/Mail.app", name: "Mail", bundleID: "com.apple.mail")
+    check(Uninstaller.blockReason(sys, running: []) != nil && Uninstaller.blockReason(InstalledApp(path: "/Applications/Xcode.app", name: "Xcode", bundleID: "com.apple.dt.Xcode"), running: []) == nil,
+          "uninstall: macOS apps blocked, Xcode allowed")
+    var cookie = Finding(path: "\(L)/Cookies/com.google.Chrome.binarycookies", title: "c", category: .apps, safety: .check, reason: "", usedFor: "", action: .trash, layer: .full)
+    let cookieOK = SafetyGuard.refusal(for: cookie, allowActiveProjects: false)
+    cookie.path = "\(L)/Cookies/com.apple.Safari.binarycookies"
+    check(cookieOK == nil || cookieOK == "Already gone.", "guard: an app's own cookie file may go")
+    check(SafetyGuard.refusal(for: cookie, allowActiveProjects: false) == "Protected location.", "guard: Apple cookie files stay")
+
     // The fast sizer and the reference walker agree byte for byte.
     let fast = DiskSizer.size(root + "/proj"), ref = DiskSizer.ftsSize(root + "/proj")
     check(fast.bytes == ref.bytes && fast.files == ref.files, "getattrlistbulk sizer matches fts (\(fast.files) files)")
@@ -223,6 +250,111 @@ case "bench":
               + "\n  bulk \(Format.bytes(bulk.bytes)) \(bulk.files) files \(String(format: "%.2f", tb)) s"
               + "  → \(String(format: "%.1f", tf / max(tb, 0.0001)))× \(same ? "identical" : "DIFFERENT (\(bulk.bytes - fts.bytes) B, \(bulk.files - fts.files) files)")")
     }
+case "apps":
+    // sapu-cli apps [name…] [--paths]  list installed apps, or show the uninstall plan for the named ones (read-only).
+    let all = Uninstaller.installedApps()
+    let wanted = args.dropFirst().filter { !$0.hasPrefix("--") }.map { $0.lowercased() }
+    let running = SystemProbe.runningProcessNames()
+    if wanted.isEmpty && !args.contains("--all") {
+        for a in all { print("\(a.name)\t\(a.bundleID ?? "-")\t\(a.caskToken.map { "brew:\($0)" } ?? (a.fromAppStore ? "App Store" : ""))") }
+    }
+    for a in all where wanted.contains(a.name.lowercased()) || wanted.contains(a.bundleID?.lowercased() ?? "") || args.contains("--all") {
+        let plan = Uninstaller.plan(for: a, running: running)
+        print("\(a.name) (\(a.bundleID ?? "no id"))  total \(Format.bytes(plan.totalBytes)), selected \(Format.bytes(plan.selectedBytes))\(plan.blocked.map { "  BLOCKED: \($0)" } ?? "")")
+        for i in plan.items { print("  [\(i.selected ? "x" : " ")] \(i.kind.rawValue.padding(toLength: 5, withPad: " ", startingAt: 0)) \(Format.bytes(i.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(i.path.tildePath)\(i.holdBack ? "  (kept)" : "")") }
+    }
+case "coverage":
+    // sapu-cli coverage <cask.json> <app-names.txt>
+    // For each listed app Homebrew knows, rebuild its documented leftovers ("zap" list) as a simulated
+    // file system and check how many of them the uninstaller finds by its own rules.
+    let rest = args.dropFirst().filter { !$0.hasPrefix("--") }.map(\.expandingTilde)
+    guard rest.count == 2, let data = FileManager.default.contents(atPath: rest[0]),
+          let casks = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+          let names = try? String(contentsOfFile: rest[1], encoding: .utf8) else { print("usage: sapu-cli coverage <cask.json> <names.txt>"); exit(2) }
+    func strings(_ v: Any?) -> [String] { (v as? [String]) ?? ((v as? String).map { [$0] } ?? []) }
+    struct CaskInfo { var token: String; var app: String; var ids: [String]; var zap: [String] }
+    var byName: [String: CaskInfo] = [:], byApp: [String: CaskInfo] = [:]
+    for c in casks {
+        guard let token = c["token"] as? String, let artifacts = c["artifacts"] as? [[String: Any]] else { continue }
+        var app: String?, ids: [String] = [], zap: [String] = []
+        for a in artifacts {
+            if let apps = a["app"] as? [Any], let first = apps.first as? String, app == nil { app = first.replacingOccurrences(of: ".app", with: "") }
+            for u in (a["uninstall"] as? [[String: Any]] ?? []) { ids += strings(u["quit"]) + strings(u["launchctl"]) }
+            for z in (a["zap"] as? [[String: Any]] ?? []) { zap += strings(z["trash"]) + strings(z["rmdir"]) }
+        }
+        guard let app, !zap.isEmpty else { continue }
+        let info = CaskInfo(token: token, app: app, ids: ids, zap: zap)
+        // The app's own file name wins over marketing names ("ChatGPT" is ChatGPT.app, not the Codex cask).
+        byApp[app.lowercased()] = byApp[app.lowercased()] ?? info
+        for n in strings(c["name"]) + [token] { byName[n.lowercased()] = byName[n.lowercased()] ?? info }
+    }
+    let home = NSHomeDirectory()
+    var tested = 0, matched = 0, totalPaths = 0, foundPaths = 0, unmatched: [String] = []
+    var misses: [String: Int] = [:], examples: [String: String] = [:]
+    for raw in names.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) where !raw.isEmpty {
+        tested += 1
+        let key = raw.lowercased().replacingOccurrences(of: ".app", with: "")
+        guard let cask = byApp[key] ?? byName[key] ?? byName[key.replacingOccurrences(of: " ", with: "-")] else { unmatched.append(raw); continue }
+        matched += 1
+        // User-space leftovers only; "*" in a documented path stands for some name, so make one up.
+        // "sfl*" is one of sfl2/3/4; a trailing "*" means "this name, maybe with a suffix"; any other "*" is some name.
+        let zap = cask.zap.filter { $0.hasPrefix("~/") }.map { z -> String in
+            var t = z.expandingTilde.replacingOccurrences(of: ".sfl*", with: ".sfl3")
+            t = t.split(separator: "/", omittingEmptySubsequences: false).map { c -> String in
+                var c = String(c)
+                if c.hasSuffix("*"), c.count > 1 { c.removeLast() }
+                return c.replacingOccurrences(of: "*", with: "x")
+            }.joined(separator: "/")
+            return t
+        }
+        guard !zap.isEmpty else { continue }
+        // The app's bundle ID: what Homebrew quits, else the reverse-DNS name its preferences use.
+        let idPattern = "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$"
+        var id = cask.ids.first { $0.range(of: idPattern, options: .regularExpression) != nil && !$0.contains("Helper") }
+        if id == nil {
+            // The reverse-DNS name used most across its folders (Preferences, Containers, Caches…).
+            var counts: [String: Int] = [:]
+            for z in zap {
+                var leaf = z.lastComponent
+                for ext in [".plist", ".savedState", ".binarycookies", ".sfl2", ".sfl3", ".sfl4"] where leaf.hasSuffix(ext) { leaf = String(leaf.dropLast(ext.count)) }
+                if leaf.range(of: idPattern, options: .regularExpression) != nil, !leaf.hasSuffix(".x"), !leaf.contains("x.") { counts[leaf, default: 0] += 1 }
+            }
+            id = counts.max { $0.value == $1.value ? $0.key.count > $1.key.count : $0.value < $1.value }?.key
+        }
+        let app = InstalledApp(path: "/Applications/\(cask.app).app", name: cask.app, bundleID: id, version: nil, executable: nil, fromAppStore: false, caskToken: cask.token)
+        let found = Uninstaller.leftovers(for: app, fs: .simulated(zap)).map { $0.lowercased() }
+        for z in zap {
+            totalPaths += 1
+            let l = z.lowercased()
+            if found.contains(where: { l == $0 || l.hasPrefix($0 + "/") }) { foundPaths += 1; continue }
+            // Group misses by where they live, to see which rule is missing.
+            let rel = z.hasPrefix(home + "/Library/") ? String(z.dropFirst(home.count + 9)) : "~/" + String(z.dropFirst(home.count + 1))
+            let bucket = rel.split(separator: "/").prefix(rel.hasPrefix("Application Support") || rel.hasPrefix("Containers") ? 1 : 1).joined(separator: "/")
+            misses[bucket, default: 0] += 1
+            if args.contains("--misses") { print("MISS\t\(cask.app)\t\(id ?? "-")\t\(z.tildePath)") }
+            if examples[bucket] == nil { examples[bucket] = "\(cask.app) (\(id ?? "no id")): \(z.tildePath)" }
+        }
+    }
+    print("Apps on the list: \(tested). Known to Homebrew with documented leftovers: \(matched).")
+    print("Documented leftover paths in your home folder: \(totalPaths). Found by Sapu's rules: \(foundPaths) (\(totalPaths > 0 ? 100 * foundPaths / totalPaths : 0)%).")
+    print("Missed, by location:")
+    for (b, n) in misses.sorted(by: { $0.value > $1.value }).prefix(25) { print("  \(n)\t\(b)\t e.g. \(examples[b]!)") }
+    if args.contains("--unmatched") { print("Not in Homebrew: " + unmatched.joined(separator: ", ")) }
+case "health":
+    let h = Health.report()
+    print("Health \(h.score)/100 — \(h.verdict)")
+    print("Memory \(Format.bytes(h.memoryUsed)) of \(Format.bytes(h.memoryTotal)) used, pressure \(h.pressure.rawValue), swap \(Format.bytes(h.swapUsed)) of \(Format.bytes(h.swapTotal))")
+    print("Load \(h.load.map { String(format: "%.2f", $0) }.joined(separator: " ")) on \(h.cores) cores, thermal \(h.thermal), up \(Format.duration(h.uptime))")
+    if let b = h.battery { print("Battery \(b.percent)%\(b.charging ? " charging" : ""), \(b.cycles.map { "\($0) cycles" } ?? ""), health \(b.health.map { "\($0)%" } ?? "?") \(b.condition ?? "")") }
+    print("Top memory: " + h.topMemory.map { "\($0.name) \(Format.bytes($0.memory))" }.joined(separator: ", "))
+    print("Top CPU: " + h.topCPU.map { "\($0.name) \(Int($0.cpu))%" }.joined(separator: ", "))
+    for a in h.advice { print("  • \(a)") }
+case "maintenance":
+    for t in Maintenance.check() {
+        let icon = ["ok": "✓", "attention": "!", "info": "·"][t.status.rawValue]!
+        print("\(icon) \(t.title)\n    \(t.detail)")
+        if case .terminal(let c) = t.fix { print("    $ \(c)") }
+    }
 default:
-    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | selftest")
+    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | selftest")
 }

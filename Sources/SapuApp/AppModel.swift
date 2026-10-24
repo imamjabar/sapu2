@@ -12,6 +12,9 @@ enum Pane: String, Hashable, CaseIterable, Identifiable {
     case files = "Old & large files"
     case projects = "Projects"
     case map = "Disk map"
+    case uninstall = "Uninstall apps"
+    case health = "Health"
+    case maintenance = "Maintenance"
     case security = "Security & versions"
     case receipts = "Receipts"
 
@@ -28,6 +31,9 @@ enum Pane: String, Hashable, CaseIterable, Identifiable {
         case .files: "doc.on.doc"
         case .projects: "folder"
         case .map: "chart.bar.doc.horizontal"
+        case .uninstall: "trash.square"
+        case .health: "heart.text.square"
+        case .maintenance: "wrench.and.screwdriver"
         case .security: "shield.lefthalf.filled"
         case .receipts: "list.bullet.clipboard"
         }
@@ -73,6 +79,19 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(activeDays, forKey: "activeDays") }
     }
 
+    // Uninstall, health and maintenance
+    @Published var installedApps: [InstalledApp] = []
+    @Published var loadingApps = false
+    @Published var selectedApp: InstalledApp.ID?
+    @Published var plan: UninstallPlan?
+    @Published var planning = false
+    @Published var uninstalling = false
+    @Published var health: HealthReport?
+    @Published var tasks: [MaintenanceTask] = []
+    @Published var checkingTasks = false
+    @Published var taskResults: [String: String] = [:]
+    @Published var runningTask: String?
+
     let engine = ScanEngine()
     @Published var hasFullDiskAccess = SystemProbe.hasFullDiskAccess
     @Published var showAccessSetup = false
@@ -98,6 +117,8 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.recheckFullDiskAccess() }
         }
         if snapshot.layerDates.isEmpty { scan([.quick, .projects]) }
+        refreshHealth()
+        checkMaintenance()
         Task { await refreshVersions(network: false) }
     }
 
@@ -238,6 +259,93 @@ final class AppModel: ObservableObject {
     }
 
     private func isCommand(_ f: Finding) -> Bool { if case .command = f.action { return true }; return false }
+
+    // MARK: Uninstall
+
+    func loadApps() {
+        guard !loadingApps else { return }
+        loadingApps = true
+        Task.detached(priority: .userInitiated) {
+            let apps = Uninstaller.installedApps()
+            await MainActor.run {
+                self.installedApps = apps; self.loadingApps = false
+                // `--args -SapuApp Discord` opens that app's plan (used for screenshots).
+                if let n = UserDefaults.standard.string(forKey: "SapuApp"), let a = apps.first(where: { $0.name == n }) { self.choose(a) }
+            }
+        }
+    }
+
+    func choose(_ app: InstalledApp) {
+        selectedApp = app.id
+        plan = nil
+        planning = true
+        Task.detached(priority: .userInitiated) {
+            let p = Uninstaller.plan(for: app, running: SystemProbe.runningProcessNames())
+            await MainActor.run { if self.selectedApp == app.id { self.plan = p; self.planning = false } }
+        }
+    }
+
+    func togglePlanItem(_ id: UninstallItem.ID) {
+        guard var p = plan, let i = p.items.firstIndex(where: { $0.id == id }), p.items[i].kind != .app else { return }
+        p.items[i].selected.toggle()
+        plan = p
+    }
+
+    /// Selects or clears every personal-data item (never the held-back ones unless chosen one by one).
+    func setPersonalData(_ on: Bool) {
+        guard var p = plan else { return }
+        for i in p.items.indices where p.items[i].kind == .data && !p.items[i].holdBack { p.items[i].selected = on }
+        plan = p
+    }
+
+    func uninstall() {
+        guard let p = plan else { return }
+        uninstalling = true
+        Task {
+            let receipt = await Uninstaller.uninstall(p, running: SystemProbe.runningProcessNames())
+            lastReceipt = receipt
+            receipts = Store.receipts()
+            uninstalling = false
+            if receipt.items.first(where: { $0.path == p.app.path })?.ok == true {
+                installedApps.removeAll { $0.id == p.app.id }
+                plan = nil; selectedApp = nil
+            } else if let app = installedApps.first(where: { $0.id == p.app.id }) {
+                choose(app)
+            }
+        }
+    }
+
+    // MARK: Health & maintenance
+
+    func refreshHealth() {
+        Task.detached(priority: .userInitiated) {
+            let h = Health.report()
+            await MainActor.run { self.health = h }
+        }
+    }
+
+    func checkMaintenance() {
+        guard !checkingTasks else { return }
+        checkingTasks = true
+        Task.detached(priority: .userInitiated) {
+            let t = Maintenance.check()
+            await MainActor.run { self.tasks = t; self.checkingTasks = false }
+        }
+    }
+
+    func runTask(_ t: MaintenanceTask) {
+        runningTask = t.id
+        Task.detached(priority: .userInitiated) {
+            let r = Maintenance.run(t)
+            let fresh = Maintenance.check()
+            await MainActor.run {
+                self.taskResults[t.id] = r.message
+                self.tasks = fresh
+                self.runningTask = nil
+                self.receipts = Store.receipts()
+            }
+        }
+    }
 
     // MARK: Helpers
 

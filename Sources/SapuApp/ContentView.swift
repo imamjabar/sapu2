@@ -11,7 +11,7 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 if !model.hasFullDiskAccess { FullDiskAccessBanner() }
-                if model.section != .overview || model.scanning != nil {
+                if ![.overview, .uninstall, .health, .maintenance].contains(model.section) || model.scanning != nil {
                     ScanBar()
                     Divider()
                 }
@@ -60,6 +60,9 @@ struct ContentView: View {
         case .overview: OverviewView()
         case .projects: ProjectsView()
         case .security: SecurityView()
+        case .uninstall: UninstallView()
+        case .health: HealthView()
+        case .maintenance: MaintenanceView()
         case .receipts: ReceiptsView()
         default: FindingsList(section: model.section)
         }
@@ -95,7 +98,18 @@ struct Sidebar: View {
 
     @ViewBuilder private func badge(_ s: Pane) -> some View {
         switch s {
-        case .overview, .receipts, .map: EmptyView()
+        case .overview, .receipts, .map, .uninstall: EmptyView()
+        case .health:
+            if let h = model.health {
+                Text("\(h.score)").font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(h.score >= 85 ? .green : h.score >= 65 ? .orange : .red)
+            }
+        case .maintenance:
+            let n = model.tasks.filter { $0.status == .attention }.count
+            if n > 0 {
+                Text("\(n)").font(.caption.weight(.bold).monospacedDigit()).foregroundStyle(.white)
+                    .padding(.horizontal, 6).padding(.vertical, 1).background(Capsule().fill(.orange))
+            }
         case .projects:
             if !model.snapshot.projects.isEmpty {
                 Text("\(model.snapshot.projects.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
