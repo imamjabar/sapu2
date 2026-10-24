@@ -247,6 +247,7 @@ public final class ScanEngine: @unchecked Sendable {
         jobs += browserCacheJobs(running: running)
         jobs += toolVersionJobs()
         jobs += supportCacheJobs(running: running)
+        jobs += catalogJobs(running: running, existing: jobs.map(\.path))
 
         let prev = Dictionary((previous?.findings ?? []).map { ($0.path, $0.bytes) }, uniquingKeysWith: max)
         let tracker = ProgressTracker(layer: .quick, phase: "Sizing \(jobs.count) known locations", expected: jobs.map { prev[$0.path] }, sink: progress)
@@ -417,6 +418,57 @@ public final class ScanEngine: @unchecked Sendable {
             }
         }
         return jobs
+    }
+
+    /// Known locations of popular apps and tools (AppCatalog). A location already covered by another
+    /// rule, inside one, or holding one is skipped so nothing is counted twice.
+    private func catalogJobs(running: Set<String>, existing: [String]) -> [Job] {
+        let taken = Set(existing)
+        func overlaps(_ p: String) -> Bool {
+            if taken.contains(p) { return true }
+            var q = p.parentPath
+            while q.count > 1 { if taken.contains(q) { return true }; q = q.parentPath }
+            return existing.contains { $0.hasPrefix(p + "/") }
+        }
+        let runningLower = Set(running.map { $0.lowercased() })
+        var seen = Set<String>()
+        var jobs: [Job] = []
+        for entry in AppCatalog.entries {
+            for path in Self.glob(entry.pattern.expandingTilde) where !seen.contains(path) && !overlaps(path) {
+                seen.insert(path)
+                // The owning app: a bundle-id segment resolved through LaunchServices, else the label's first word.
+                let idSegment = path.split(separator: "/").map(String.init).first { $0.filter { $0 == "." }.count >= 2 && !$0.hasPrefix(".") }
+                let app = idSegment.flatMap { SystemProbe.app(forBundleID: $0) }
+                let owner = app?.name ?? String(entry.label.split(separator: " ").first ?? "")
+                let names = [app?.name, app?.executable, owner].compactMap { $0?.lowercased() }
+                jobs.append(Job(path: path) { r in
+                    guard r.bytes >= 10_000_000 else { return nil }
+                    let open = names.contains { runningLower.contains($0) }
+                    let isLog = entry.category == .logs
+                    let title = app.map { a in entry.label.replacingOccurrences(of: owner, with: a.name) } ?? entry.label
+                    // macOS rebuilds its own caches by redoing the work (photo analysis, maps), which costs battery and time.
+                    let apple = path.contains("/com.apple.")
+                    return Finding(path: path, title: title.prefix(1).uppercased() + title.dropFirst(), category: entry.category,
+                                   safety: apple && !isLog ? .check : .safe, bytes: r.bytes, files: r.files, lastModified: r.newestDate,
+                                   reason: isLog ? "Logs and crash reports \(owner) writes and rarely deletes."
+                                       : apple ? "A macOS cache. It comes back, but macOS redoes the work to rebuild it (for photo analysis that can take hours of background processing)."
+                                       : "Data \(owner) downloads or generates to work faster. It is rebuilt when needed.",
+                                   usedFor: isLog ? "Troubleshooting \(owner)." : "Speeding up \(owner).", owner: owner,
+                                   rebuild: isLog ? "Not needed." : "\(owner) recreates it as needed.", action: .trash,
+                                   lockedReason: open ? "\(owner) is running. Quit it first." : nil, layer: .quick)
+                })
+            }
+        }
+        return jobs
+    }
+
+    /// Expands `*` patterns (never following symlinks into other places).
+    static func glob(_ pattern: String) -> [String] {
+        guard pattern.contains("*") else { return DiskSizer.exists(pattern) && !DiskSizer.isSymlink(pattern) ? [pattern] : [] }
+        var g = glob_t()
+        defer { globfree(&g) }
+        guard Darwin.glob(pattern, 0, nil, &g) == 0 else { return [] }
+        return (0..<Int(g.gl_pathc)).compactMap { g.gl_pathv[$0].map { String(cString: $0) } }.filter { !DiskSizer.isSymlink($0) }
     }
 
     /// Cache and log folders apps keep inside their Application Support folder.

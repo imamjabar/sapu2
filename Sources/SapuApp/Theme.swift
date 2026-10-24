@@ -10,10 +10,13 @@ extension Pane {
         case .caches: .blue
         case .artifacts: .orange
         case .logs: .brown
-        case .apps: .purple
+        case .apps: .indigo
         case .files: .pink
         case .projects: .teal
         case .map: .mint
+        case .uninstall: .purple
+        case .health: .pink
+        case .maintenance: .cyan
         case .security: .red
         case .receipts: .gray
         }
@@ -32,6 +35,9 @@ extension Pane {
         case .files: "Big single files and Downloads untouched for 6+ months. Never pre-selected."
         case .projects: "Every repo on this Mac. Projects you're working on are locked."
         case .map: "Every home and Library folder, so nothing is hidden. Measured only."
+        case .uninstall: "Remove an app with everything it left in your Library. Caches go; your data stays unless you choose."
+        case .health: "Memory, swap, processor, disk, battery and heat, and what is using them."
+        case .maintenance: "Small fixes macOS doesn't do by itself: broken login items, damaged settings, stale caches."
         case .security: "Runtimes and project versions checked for end-of-life and missing CVE fixes."
         case .receipts: "Every cleanup, and where each item went so you can put it back."
         }
@@ -40,14 +46,14 @@ extension Pane {
     /// Sidebar groups. Each group is one job: clean, free space, understand, protect.
     static let groups: [(String, [Pane])] = [
         ("Clean up", [.cleanable, .caches, .artifacts, .logs]),
-        ("Free up space", [.apps, .files]),
+        ("Free up space", [.apps, .uninstall, .files]),
         ("Understand", [.projects, .map]),
-        ("Protect", [.security]),
+        ("Keep it healthy", [.health, .maintenance, .security]),
         ("History", [.receipts]),
     ]
 
     /// Panes whose rows open the details inspector.
-    var showsInspector: Bool { ![.projects, .security, .receipts].contains(self) }
+    var showsInspector: Bool { ![.projects, .security, .receipts, .uninstall, .health, .maintenance].contains(self) }
 }
 
 /// Rounded, gradient-filled icon square, the visual anchor of every section.
