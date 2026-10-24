@@ -20,6 +20,7 @@ struct SapuApp: App {
                 Button("Scan projects") { model.scan([.projects]) }.keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Full map") { model.scan([.full]) }.keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Scan everything") { model.scan(ScanLayer.allCases) }.keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("Full rescan (ignore cache)") { model.rescanFresh() }
                 Divider()
                 Button("Cancel scan") { model.cancelScan() }.keyboardShortcut(".").disabled(model.scanning == nil)
             }

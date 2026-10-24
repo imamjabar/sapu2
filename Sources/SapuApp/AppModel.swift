@@ -69,13 +69,15 @@ final class AppModel: ObservableObject {
     @Published var allowActiveProjects = UserDefaults.standard.bool(forKey: "allowActiveProjects") {
         didSet { UserDefaults.standard.set(allowActiveProjects, forKey: "allowActiveProjects") }
     }
-    @Published var activeDays = UserDefaults.standard.object(forKey: "activeDays") as? Int ?? 14 {
+    @Published var activeDays = UserDefaults.standard.object(forKey: "activeDays") as? Int ?? 30 {
         didSet { UserDefaults.standard.set(activeDays, forKey: "activeDays") }
     }
 
     let engine = ScanEngine()
     @Published var hasFullDiskAccess = SystemProbe.hasFullDiskAccess
     @Published var showAccessSetup = false
+    /// Folders the last layer took from the cache because the change journal showed no change.
+    @Published var lastReused = 0
     @Published var accessJustGranted = false
     private var accessTimer: Timer?
 
@@ -128,12 +130,22 @@ final class AppModel: ObservableObject {
                 if !engine.isCancelled { snapshot.replace(layer: .full, with: found) }
             }
             if engine.isCancelled { queue = []; break }
+            engine.commit(into: &snapshot, layer: layer)
+            lastReused = engine.reusedCount
             snapshot.layerDates[layer.rawValue] = Date()
             snapshot.layerDurations[layer.rawValue] = Date().timeIntervalSince(start)
             finishSnapshot()
         }
         scanning = nil
         progress = nil
+        engine.forceFresh = false
+    }
+
+    /// Measures every folder again, ignoring the cache (Scan › Full rescan).
+    func rescanFresh() {
+        guard scanning == nil else { return }
+        engine.forceFresh = true
+        scan(ScanLayer.allCases)
     }
 
     func cancelScan() { queue = []; engine.cancel() }

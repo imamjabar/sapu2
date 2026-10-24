@@ -19,11 +19,21 @@ struct ArtifactKind: Sendable {
 public struct ProjectScanResult: Sendable {
     public var projects: [Project]
     public var findings: [Finding]
+    /// What discovery found in each folder two levels below home, for reuse on the next scan.
+    public var discovery: [String: DiscoveryUnit] = [:]
+}
+
+/// Discovery results for one folder (e.g. ~/Machine Learning/NextCRM), cached between scans.
+public struct DiscoveryUnit: Codable, Sendable {
+    public var markerDirs: [String] = []
+    public var gitRoots: [String] = []
+    public var readmeDirs: [String] = []
+    public var candidates: [String] = []
 }
 
 public final class ProjectScanner: @unchecked Sendable {
-    public var activeDays = 14
-    public var staleDays = 60
+    public var activeDays = 30
+    public var staleDays = 90
     public var maxDepth = 8
 
     static let kinds: [ArtifactKind] = [
@@ -66,6 +76,15 @@ public final class ProjectScanner: @unchecked Sendable {
         "package.json", "composer.json", "pyproject.toml", "requirements.txt", "setup.py", "go.mod", "Cargo.toml",
         "Gemfile", "pubspec.yaml", "build.gradle", "build.gradle.kts", "pom.xml", "Podfile", "project.godot",
         "Package.swift", "artisan", "manage.py", "environment.yml",
+        // Workspace roots: a monorepo or multi-service app is one project, not one per package.
+        "pnpm-workspace.yaml", "lerna.json", "nx.json", "turbo.json", "rush.json", "go.work",
+        "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".projectile",
+    ]
+
+    /// Folders that hold projects rather than being one (checked by name at any depth).
+    static let containerNames: Set<String> = [
+        "Desktop", "Documents", "Downloads", "Projects", "projects", "Sites", "Developer", "dev", "Dev", "code", "Code",
+        "src", "repos", "Repos", "GitHub", "github", "git", "workspace", "Workspace", "work", "Work",
     ]
 
     /// Top-level home folders that hold tools, caches or media, not projects.
@@ -84,12 +103,21 @@ public final class ProjectScanner: @unchecked Sendable {
                      cancelled: @escaping () -> Bool,
                      onDiscover: (String) -> Void,
                      onArtifactsFound: (Int) -> Void,
-                     sizeArtifact: (String) -> SizeResult) -> ProjectScanResult {
+                     sizeArtifact: (String) -> SizeResult,
+                     changes: ChangeSet? = nil,
+                     discoveryCache: [String: DiscoveryUnit] = [:],
+                     previousProjects: [Project] = []) -> ProjectScanResult {
+        let previousByPath = Dictionary(previousProjects.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
         var markerDirs = Set<String>()
         var gitRoots = Set<String>()
+        var readmeDirs = Set<String>()
         var candidates: [String] = []
 
-        for root in roots { walk(root, markerDirs: &markerDirs, gitRoots: &gitRoots, candidates: &candidates, cancelled: cancelled, onDiscover: onDiscover) }
+        var units: [String: DiscoveryUnit] = [:]
+        for root in roots {
+            walk(root, markerDirs: &markerDirs, gitRoots: &gitRoots, readmeDirs: &readmeDirs, candidates: &candidates,
+                 units: &units, changes: changes, cache: discoveryCache, cancelled: cancelled, onDiscover: onDiscover)
+        }
 
         // Resolve artifact candidates to kinds.
         var artifacts: [(path: String, kind: ArtifactKind)] = []
@@ -98,19 +126,50 @@ public final class ProjectScanner: @unchecked Sendable {
         }
         onArtifactsFound(artifacts.count)
 
-        // Group marker dirs into projects: the enclosing git repo if there is one.
+        // What counts as one project (the rule IDEs and Projectile use):
+        //  1. A git repository is one project, including everything nested in it (packages, examples,
+        //     vendored clones). The outermost repository wins.
+        //  2. Without git, a component joins the outermost ancestor that is itself a project: it has a
+        //     manifest, a workspace file (pnpm-workspace, go.work, docker-compose…), or a README with
+        //     two or more components under it.
+        //  3. Climbing stops at containers: the scan root's direct children (~/Sites, ~/Documents…)
+        //     and folders named like Projects, Downloads or GitHub are never merged into one project.
+        //  4. A folder right under an area of your home (~/Machine Learning/Campus Intelligence) that holds
+        //     its own loose files (notes, docs, data) and two or more components is a workspace: one
+        //     project. A folder with nothing but subfolders stays a plain container.
+        for dir in readmeDirs where markerDirs.filter({ $0.parentPath == dir }).count >= 2 { markerDirs.insert(dir) }
+        let home = NSHomeDirectory()
+        if roots.contains(home) {
+            var perUnit: [String: Int] = [:]
+            for m in markerDirs where m.hasPrefix(home + "/") {
+                let parts = m.dropFirst(home.count + 1).split(separator: "/")
+                guard parts.count > 2 else { continue }
+                perUnit[home + "/" + parts.prefix(2).joined(separator: "/"), default: 0] += 1
+            }
+            for (unit, count) in perUnit where count >= 2 && !Self.containerNames.contains(unit.lastComponent)
+                && !Self.containerNames.contains(unit.parentPath.lastComponent) && !markerDirs.contains(unit) {
+                let loose = DiskSizer.children(unit, includeHidden: false).contains { !DiskSizer.isDirectory($0) && !DiskSizer.isSymlink($0) }
+                if loose { markerDirs.insert(unit) }
+            }
+        }
+        func isContainer(_ p: String) -> Bool {
+            if roots.contains(p) || Self.containerNames.contains(p.lastComponent) { return true }
+            return roots.contains(p.parentPath)
+        }
         func projectRoot(for dir: String) -> String {
             var p = dir
             var best = dir
-            while p.count > 1 && p != NSHomeDirectory() {
-                if gitRoots.contains(p) { best = p }
+            var git: String?
+            while p.count > 1 && !roots.contains(p) && p != NSHomeDirectory() {
+                if gitRoots.contains(p), !Self.containerNames.contains(p.lastComponent) { git = p } else if p != dir, markerDirs.contains(p), !isContainer(p) { best = p }
                 p = p.parentPath
             }
-            return best
+            return git ?? best
         }
         var projectPaths = Set(markerDirs.map(projectRoot))
-        projectPaths.formUnion(gitRoots)
+        projectPaths.formUnion(gitRoots.map(projectRoot))
         projectPaths.remove(NSHomeDirectory())
+        for r in roots { projectPaths.remove(r) }
 
         var byProject: [String: [(path: String, kind: ArtifactKind)]] = [:]
         for a in artifacts {
@@ -125,14 +184,17 @@ public final class ProjectScanner: @unchecked Sendable {
         for path in projectPaths.sorted() {
             if cancelled() { break }
             let arts = byProject[path] ?? []
-            let activity = lastActivity(path)
-            let git = gitRoots.contains(path) && !arts.isEmpty ? gitState(path) : nil
+            // Nothing inside changed since last scan: activity, git state and declared versions are the same.
+            let unchanged = changes.map { !$0.isDirty(path) } ?? false
+            let old = unchanged ? previousByPath[path] : nil
+            let activity = old != nil ? old!.lastActivity : lastActivity(path)
+            let git = old != nil ? old!.git : (gitRoots.contains(path) && !arts.isEmpty ? gitState(path) : nil)
             let days = activity.map { Int(now.timeIntervalSince($0) / 86_400) } ?? 9_999
             // Uncommitted work keeps a project at least "recent" (never auto-safe).
             var status: ProjectStatus = days < activeDays ? .active : (days < staleDays ? .recent : .stale)
             if status == .stale, (git?.dirtyFiles ?? 0) > 0 { status = .recent }
             var project = Project(path: path, name: path.lastComponent, kinds: [], lastActivity: activity, git: git,
-                                  status: status, artifactBytes: 0, declared: VersionAudit.declaredVersions(in: path))
+                                  status: status, artifactBytes: 0, declared: old?.declared ?? VersionAudit.declaredVersions(in: path))
             var kinds = Set<String>()
             for a in arts {
                 if cancelled() { break }
@@ -158,13 +220,19 @@ public final class ProjectScanner: @unchecked Sendable {
                                         action: .truncateLogs, layer: .projects))
             }
         }
-        return ProjectScanResult(projects: projects.sorted { $0.artifactBytes > $1.artifactBytes }, findings: findings)
+        return ProjectScanResult(projects: projects.sorted { $0.artifactBytes > $1.artifactBytes }, findings: findings,
+                                 discovery: cancelled() ? [:] : units)
     }
 
     // MARK: Discovery walk
 
-    private func walk(_ root: String, markerDirs: inout Set<String>, gitRoots: inout Set<String>,
-                      candidates: inout [String], cancelled: () -> Bool, onDiscover: (String) -> Void) {
+    /// One fts pass over the tree, with no stat per file. Under home, each folder two levels down
+    /// (~/Area/Project) is a cache unit: if the change journal says nothing in it changed since the
+    /// last scan, its previous results are reused and the folder isn't read at all.
+    private func walk(_ root: String, markerDirs: inout Set<String>, gitRoots: inout Set<String>, readmeDirs: inout Set<String>,
+                      candidates: inout [String], units: inout [String: DiscoveryUnit],
+                      changes: ChangeSet?, cache: [String: DiscoveryUnit],
+                      cancelled: () -> Bool, onDiscover: (String) -> Void) {
         guard let cPath = strdup(root) else { return }
         defer { free(cPath) }
         var argv: [UnsafeMutablePointer<CChar>?] = [cPath, nil]
@@ -172,12 +240,20 @@ public final class ProjectScanner: @unchecked Sendable {
         guard let fts = fts_open(&argv, FTS_PHYSICAL | FTS_XDEV | FTS_NOCHDIR | FTS_NOSTAT, nil) else { return }
         defer { fts_close(fts) }
         let isHome = root == NSHomeDirectory()
+        var unit: (path: String, found: DiscoveryUnit)?
+        func note(_ update: (inout DiscoveryUnit) -> Void) {
+            if unit != nil { update(&unit!.found) }
+        }
         var n = 0
         while let ent = fts_read(fts) {
             n += 1
             if n & 1023 == 0 && cancelled() { return }
             let info = Int32(ent.pointee.fts_info)
             let level = Int(ent.pointee.fts_level)
+            if info == FTS_DP {
+                if isHome, level == 2, let u = unit, u.path == String(cString: ent.pointee.fts_path) { units[u.path] = u.found; unit = nil }
+                continue
+            }
             let path = String(cString: ent.pointee.fts_path)
             let name = path.lastComponent
             if info == FTS_D {
@@ -185,19 +261,35 @@ public final class ProjectScanner: @unchecked Sendable {
                 if isHome && level == 1 && (Self.skipTopLevel.contains(name) || (name.hasPrefix(".") && !Self.artifactNames.contains(name))) {
                     fts_set(fts, ent, FTS_SKIP); continue
                 }
-                if name == ".git" { gitRoots.insert(path.parentPath); fts_set(fts, ent, FTS_SKIP); continue }
+                if name == ".git" {
+                    gitRoots.insert(path.parentPath); note { $0.gitRoots.append(path.parentPath) }
+                    fts_set(fts, ent, FTS_SKIP); continue
+                }
                 if Self.artifactNames.contains(name), kind(for: path) != nil {
-                    candidates.append(path); fts_set(fts, ent, FTS_SKIP); continue
+                    candidates.append(path); note { $0.candidates.append(path) }
+                    fts_set(fts, ent, FTS_SKIP); continue
                 }
                 if Self.skipAnywhere.contains(name) || DiskSizer.neverEnter.contains(name)
                     || Self.bundleSuffixes.contains(where: name.hasSuffix) || level >= maxDepth {
                     fts_set(fts, ent, FTS_SKIP); continue
                 }
+                if isHome && level == 2 {
+                    if let changes, !changes.isDirty(path), let cached = cache[path] {
+                        markerDirs.formUnion(cached.markerDirs)
+                        gitRoots.formUnion(cached.gitRoots)
+                        readmeDirs.formUnion(cached.readmeDirs)
+                        candidates += cached.candidates
+                        units[path] = cached
+                        fts_set(fts, ent, FTS_SKIP); continue
+                    }
+                    unit = (path, DiscoveryUnit())
+                }
                 if level <= 3 { onDiscover(path) }
-            } else if level > 0 && Self.markers.contains(name) {
-                markerDirs.insert(path.parentPath)
-            } else if level > 0 && name.hasSuffix(".xcodeproj") {
-                markerDirs.insert(path.parentPath)
+            } else if level > 0 && (Self.markers.contains(name) || name.hasSuffix(".xcodeproj")
+                                    || name.hasSuffix(".code-workspace") || name.hasSuffix(".sln")) {
+                markerDirs.insert(path.parentPath); note { $0.markerDirs.append(path.parentPath) }
+            } else if level > 1 && name.hasPrefix("README") {
+                readmeDirs.insert(path.parentPath); note { $0.readmeDirs.append(path.parentPath) }
             }
         }
     }

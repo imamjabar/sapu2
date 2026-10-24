@@ -42,9 +42,24 @@ public enum SystemProbe {
         return (url.deletingPathExtension().lastPathComponent, exe)
     }
 
+    /// When an app was last used. Spotlight's "last opened" is often missing (Microsoft Office,
+    /// apps launched from the Dock or by Login Items), so the newest of these counts:
+    /// Spotlight, the app's own preferences (sandboxed or not), and its saved window state.
     public static func lastUsed(app path: String) -> Date? {
-        guard let item = MDItemCreate(nil, path as CFString) else { return nil }
-        return MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
+        var dates: [Date] = []
+        if let item = MDItemCreate(nil, path as CFString), let d = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date {
+            dates.append(d)
+        }
+        if let id = Bundle(path: path)?.bundleIdentifier {
+            let lib = NSHomeDirectory() + "/Library"
+            for p in ["\(lib)/Preferences/\(id).plist",
+                      "\(lib)/Containers/\(id)/Data/Library/Preferences/\(id).plist",
+                      "\(lib)/Saved Application State/\(id).savedState",
+                      "\(lib)/Containers/\(id)/Data/Library/Saved Application State/\(id).savedState"] {
+                if let m = DiskSizer.mtime(p) { dates.append(m) }
+            }
+        }
+        return dates.max()
     }
 
     /// Full Disk Access is needed to size Mail, Safari, Messages and some containers.

@@ -28,7 +28,7 @@ extension Pane {
         case .caches: "Package-manager, IDE, browser and app caches. Apps refill them as needed."
         case .artifacts: "node_modules, virtualenvs, vendor, target and build output, grouped by project."
         case .logs: "Log files that grew large. Emptied in place so running services keep working."
-        case .apps: "Installed apps and when you last opened them."
+        case .apps: "Installed apps, when you last used them, and data left behind by apps you removed."
         case .files: "Big single files and Downloads untouched for 6+ months. Never pre-selected."
         case .projects: "Every repo on this Mac. Projects you're working on are locked."
         case .map: "Every home and Library folder, so nothing is hidden. Measured only."
