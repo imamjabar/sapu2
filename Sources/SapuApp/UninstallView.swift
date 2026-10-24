@@ -108,7 +108,8 @@ struct PlanView: View {
                         }
                         Spacer()
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text(Format.bytes(plan.totalBytes)).font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
+                            Text(plan.sized ? Format.bytes(plan.totalBytes) : "Counting…").font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
+                                .contentTransition(.numericText())
                             Text("app and all its files").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -131,7 +132,7 @@ struct PlanView: View {
                                 VStack(spacing: 0) {
                                     ForEach(Array(g.2.enumerated()), id: \.element.id) { i, item in
                                         if i > 0 { Divider().padding(.vertical, 6) }
-                                        PlanRow(item: item, appName: plan.app.name)
+                                        PlanRow(item: item, appName: plan.app.name, sized: plan.sized)
                                     }
                                 }
                             }
@@ -143,18 +144,18 @@ struct PlanView: View {
             Divider()
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("\(Format.bytes(plan.selectedBytes)) goes to the Trash").font(.headline.monospacedDigit())
+                    Text(plan.sized ? "\(Format.bytes(plan.selectedBytes)) goes to the Trash" : "\(plan.items.filter(\.selected).count) items go to the Trash").font(.headline.monospacedDigit())
                     Text("\(plan.items.filter(\.selected).count) of \(plan.items.count) items. Put back from the Trash any time.").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if model.uninstalling { ProgressView().controlSize(.small) }
+                if model.uninstalling || !plan.sized { ProgressView().controlSize(.small) }
                 Button {
                     model.uninstall()
                 } label: {
                     Label("Uninstall \(plan.app.name)", systemImage: "trash")
                 }
                 .buttonStyle(GradientButtonStyle(tint: .purple))
-                .disabled(plan.blocked != nil || model.uninstalling)
+                .disabled(plan.blocked != nil || model.uninstalling || !plan.sized)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -167,6 +168,7 @@ struct PlanRow: View {
     @EnvironmentObject var model: AppModel
     let item: UninstallItem
     let appName: String
+    var sized = true
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -178,7 +180,7 @@ struct PlanRow: View {
                 if item.kind == .agent || item.holdBack { Text(item.note).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 8)
-            Text(Format.bytes(item.bytes)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+            Text(sized ? Format.bytes(item.bytes) : "…").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             Button { model.reveal(item.path) } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(.borderless).help("Show in Finder")
         }

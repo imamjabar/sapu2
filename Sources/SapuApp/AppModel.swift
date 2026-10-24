@@ -267,6 +267,7 @@ final class AppModel: ObservableObject {
         loadingApps = true
         Task.detached(priority: .userInitiated) {
             let apps = Uninstaller.installedApps()
+            Task.detached(priority: .utility) { Uninstaller.warm(apps) }
             await MainActor.run {
                 self.installedApps = apps; self.loadingApps = false
                 // `--args -SapuApp Discord` opens that app's plan (used for screenshots).
@@ -279,9 +280,20 @@ final class AppModel: ObservableObject {
         selectedApp = app.id
         plan = nil
         planning = true
+        let apps = installedApps
         Task.detached(priority: .userInitiated) {
-            let p = Uninstaller.plan(for: app, running: SystemProbe.runningProcessNames())
-            await MainActor.run { if self.selectedApp == app.id { self.plan = p; self.planning = false } }
+            // The list first (a fraction of a second), then the sizes; choices made meanwhile are kept.
+            let running = SystemProbe.runningProcessNames()
+            let quick = Uninstaller.plan(for: app, running: running, apps: apps, sized: false)
+            await MainActor.run { if self.selectedApp == app.id { self.plan = quick; self.planning = false } }
+            let sizedPlan = Uninstaller.plan(for: app, running: running, apps: apps)
+            await MainActor.run {
+                guard self.selectedApp == app.id, let shown = self.plan else { return }
+                var full = sizedPlan
+                let picked = Dictionary(shown.items.map { ($0.path, $0.selected) }, uniquingKeysWith: { a, _ in a })
+                for i in full.items.indices { if let s = picked[full.items[i].path] { full.items[i].selected = s } }
+                self.plan = full
+            }
         }
     }
 

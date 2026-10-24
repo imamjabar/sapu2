@@ -463,7 +463,7 @@ public final class ScanEngine: @unchecked Sendable {
     }
 
     /// Expands `*` patterns (never following symlinks into other places).
-    static func glob(_ pattern: String) -> [String] {
+    public static func glob(_ pattern: String) -> [String] {
         guard pattern.contains("*") else { return DiskSizer.exists(pattern) && !DiskSizer.isSymlink(pattern) ? [pattern] : [] }
         var g = glob_t()
         defer { globfree(&g) }

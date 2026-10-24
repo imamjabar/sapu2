@@ -186,6 +186,23 @@ func selftest() -> Int32 {
     check(Uninstaller.holdBack("\(L)/Group Containers/EQHXZ8M8AV.com.google.Chrome") && Uninstaller.holdBack("\(L)/Application Support/Google/Chrome")
           && Uninstaller.classify("\(L)/Caches/com.google.Chrome") == .cache && Uninstaller.classify("\(L)/Preferences/com.google.Chrome.plist") == .data,
           "uninstall: caches preselected, data kept, profiles and app groups held back")
+    let subs = Uninstaller.FileView.simulated([
+        "\(L)/Preferences/com.google.GeminiMacOS.launcher.plist", "\(L)/Preferences/com.google.GeminiMacOS.beta.plist",
+        "\(L)/Containers/com.microsoft.errorreporting/x", "\(L)/Application Support/com.evernote.EvernoteHelper/x",
+        "\(L)/Preferences/com.google.chrome.for.testing.plist", "\(L)/Application Support/iTerm2/x",
+    ])
+    let gemini = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Gemini.app", name: "Gemini", bundleID: "com.google.GeminiMacOS"), fs: subs)
+    check(gemini.contains("\(L)/Preferences/com.google.GeminiMacOS.launcher.plist") && !gemini.contains { $0.contains(".beta") },
+          "uninstall: <id>.helper found, <id>.beta (another channel) kept")
+    let evernote = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Evernote.app", name: "Evernote", bundleID: "com.evernote.Evernote"), fs: subs)
+    let iterm = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/iTerm.app", name: "iTerm", bundleID: "com.googlecode.iterm2"), fs: subs)
+    check(evernote.contains("\(L)/Application Support/com.evernote.EvernoteHelper") && iterm.contains("\(L)/Application Support/iTerm2"),
+          "uninstall: <id>Helper and the bundle-ID name (iTerm2) found")
+    let chrome2 = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Google Chrome.app", name: "Google Chrome", bundleID: "com.google.Chrome"), fs: subs)
+    let word = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Microsoft Word.app", name: "Microsoft Word", bundleID: "com.microsoft.Word"),
+                                     fs: subs, otherIDs: ["com.microsoft.excel", "com.microsoft.errorreporting"])
+    check(!chrome2.contains { $0.contains("for.testing") } && !word.contains { $0.contains("errorreporting") },
+          "uninstall: Chrome for Testing and helpers shared with other apps are kept")
     let sys = InstalledApp(path: "/System/Applications/Mail.app", name: "Mail", bundleID: "com.apple.mail")
     check(Uninstaller.blockReason(sys, running: []) != nil && Uninstaller.blockReason(InstalledApp(path: "/Applications/Xcode.app", name: "Xcode", bundleID: "com.apple.dt.Xcode"), running: []) == nil,
           "uninstall: macOS apps blocked, Xcode allowed")
@@ -251,7 +268,7 @@ case "bench":
               + "  → \(String(format: "%.1f", tf / max(tb, 0.0001)))× \(same ? "identical" : "DIFFERENT (\(bulk.bytes - fts.bytes) B, \(bulk.files - fts.files) files)")")
     }
 case "apps":
-    // sapu-cli apps [name…] [--paths]  list installed apps, or show the uninstall plan for the named ones (read-only).
+    // sapu-cli apps [name…|--all] [--no-size]  list installed apps, or show the uninstall plan for the named ones (read-only).
     let all = Uninstaller.installedApps()
     let wanted = args.dropFirst().filter { !$0.hasPrefix("--") }.map { $0.lowercased() }
     let running = SystemProbe.runningProcessNames()
@@ -259,7 +276,7 @@ case "apps":
         for a in all { print("\(a.name)\t\(a.bundleID ?? "-")\t\(a.caskToken.map { "brew:\($0)" } ?? (a.fromAppStore ? "App Store" : ""))") }
     }
     for a in all where wanted.contains(a.name.lowercased()) || wanted.contains(a.bundleID?.lowercased() ?? "") || args.contains("--all") {
-        let plan = Uninstaller.plan(for: a, running: running)
+        let plan = Uninstaller.plan(for: a, running: running, apps: all, sized: !args.contains("--no-size"))
         print("\(a.name) (\(a.bundleID ?? "no id"))  total \(Format.bytes(plan.totalBytes)), selected \(Format.bytes(plan.selectedBytes))\(plan.blocked.map { "  BLOCKED: \($0)" } ?? "")")
         for i in plan.items { print("  [\(i.selected ? "x" : " ")] \(i.kind.rawValue.padding(toLength: 5, withPad: " ", startingAt: 0)) \(Format.bytes(i.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(i.path.tildePath)\(i.holdBack ? "  (kept)" : "")") }
     }
@@ -268,9 +285,9 @@ case "coverage":
     // For each listed app Homebrew knows, rebuild its documented leftovers ("zap" list) as a simulated
     // file system and check how many of them the uninstaller finds by its own rules.
     let rest = args.dropFirst().filter { !$0.hasPrefix("--") }.map(\.expandingTilde)
-    guard rest.count == 2, let data = FileManager.default.contents(atPath: rest[0]),
+    guard rest.count == 2 || (rest.count == 1 && args.contains("--real")), let data = FileManager.default.contents(atPath: rest[0]),
           let casks = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-          let names = try? String(contentsOfFile: rest[1], encoding: .utf8) else { print("usage: sapu-cli coverage <cask.json> <names.txt>"); exit(2) }
+          let names = rest.count == 2 ? try? String(contentsOfFile: rest[1], encoding: .utf8) : "" else { print("usage: sapu-cli coverage <cask.json> <names.txt>"); exit(2) }
     func strings(_ v: Any?) -> [String] { (v as? [String]) ?? ((v as? String).map { [$0] } ?? []) }
     struct CaskInfo { var token: String; var app: String; var ids: [String]; var zap: [String] }
     var byName: [String: CaskInfo] = [:], byApp: [String: CaskInfo] = [:]
@@ -289,6 +306,29 @@ case "coverage":
         for n in strings(c["name"]) + [token] { byName[n.lowercased()] = byName[n.lowercased()] ?? info }
     }
     let home = NSHomeDirectory()
+    if args.contains("--real") {
+        // Installed apps only: documented leftovers that exist on this Mac, against what Sapu finds on disk.
+        var apps = 0, total = 0, hit = 0, bytesAll: Int64 = 0, bytesHit: Int64 = 0
+        let installed = Uninstaller.installedApps()
+        for app in installed {
+            let key = app.path.lastComponent.replacingOccurrences(of: ".app", with: "").lowercased()
+            guard let cask = byApp[key] ?? (app.caskToken.flatMap { byName[$0.lowercased()] }) else { continue }
+            let existing = Set(cask.zap.filter { $0.hasPrefix("~/") }.flatMap { ScanEngine.glob($0.expandingTilde) })
+                .filter { $0.hasPrefix(home + "/") && !Uninstaller.isNamesake($0) }
+            guard !existing.isEmpty else { continue }
+            apps += 1
+            let found = Uninstaller.leftovers(for: app, apps: installed).map { $0.lowercased() }
+            for z in existing.sorted() {
+                let size = DiskSizer.size(z).bytes, l = z.lowercased()
+                total += 1; bytesAll += size
+                if found.contains(where: { l == $0 || l.hasPrefix($0 + "/") }) { hit += 1; bytesHit += size; continue }
+                if args.contains("--misses") { print("MISS\t\(app.name)\t\(app.bundleID ?? "-")\t\(Format.bytes(size))\t\(z.tildePath)") }
+            }
+        }
+        print("Installed apps with documented leftovers on this Mac: \(apps).")
+        print("Leftovers present: \(total) (\(Format.bytes(bytesAll))). Found by Sapu: \(hit) (\(total > 0 ? 100 * hit / total : 0)%), \(Format.bytes(bytesHit)) (\(bytesAll > 0 ? Int(100 * bytesHit / bytesAll) : 0)% of the space).")
+        exit(0)
+    }
     var tested = 0, matched = 0, totalPaths = 0, foundPaths = 0, unmatched: [String] = []
     var misses: [String: Int] = [:], examples: [String: String] = [:]
     for raw in names.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) where !raw.isEmpty {
