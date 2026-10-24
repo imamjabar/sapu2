@@ -13,7 +13,7 @@ struct OverviewView: View {
                 HomeHero()
 
                 VStack(alignment: .leading, spacing: 12) {
-                    SectionTitle(title: "Clean up", subtitle: "Each card is one kind of clutter. Open it to see why it's there and what's safe.")
+                    SectionTitle(title: "Clean up", subtitle: "One card per kind of clutter. Open one to see why each item is there and whether it's safe.")
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 14) {
                         ForEach([Pane.cleanable, .caches, .artifacts, .logs, .apps, .files]) { CategoryTile(pane: $0) }
                     }
@@ -80,6 +80,8 @@ struct HomeHero: View {
                 if let v = s.volume {
                     Text("\(Format.bytes(v.free)) free")
                         .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
+                        .contentTransition(.numericText())
+                        .animation(.easeOut(duration: 0.3), value: v.free)
                     Text(status(v)).font(.title3).foregroundStyle(.secondary)
                 }
                 if let layer = model.scanning {
@@ -159,8 +161,19 @@ struct CategoryTile: View {
                 Text(pane.title).font(.headline)
                 Text(headline).font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(headlineColor)
-                Text(pane.blurb).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.25), value: headline)
+                VStack(alignment: .leading, spacing: 3) {
+                    if detail.isEmpty {
+                        Text(pane.blurb).foregroundStyle(.secondary).lineLimit(2)
+                    } else {
+                        ForEach(detail, id: \.self) { line in
+                            Text(line).foregroundStyle(pane.tint.opacity(0.9)).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                }
+                .font(.caption)
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .topLeading)
             }
             .padding(16)
             .background(
@@ -174,6 +187,22 @@ struct CategoryTile: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+        .help(pane.blurb)
+    }
+
+    /// The two biggest real items behind the number, so each card shows content, not a description.
+    private var detail: [String] {
+        let s = model.snapshot
+        switch pane {
+        case .projects:
+            return s.projects.filter { $0.status == .active }.sorted { ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast) }
+                .prefix(2).map { "\($0.name) · \(Format.age($0.lastActivity))" }
+        case .security:
+            return model.versions.filter { $0.level == .eol }.prefix(2).map { "\($0.product) \($0.version) · \($0.source)" }
+        default:
+            return s.findings.filter { pane.includes($0) && $0.action != .none }.sorted { $0.bytes > $1.bytes }
+                .prefix(2).map { "\($0.title) · \(Format.bytes($0.bytes))" }
+        }
     }
 
     private var headline: String {

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 public struct ScanProgress: Sendable {
@@ -127,6 +128,61 @@ public final class ScanEngine: @unchecked Sendable {
 
     public init() {}
 
+    /// Ignore the size cache and measure everything (Scan › Full rescan).
+    public var forceFresh = false
+    /// Cached sizes older than this are measured again regardless of the journal.
+    public var cacheMaxAge: TimeInterval = 7 * 86_400
+
+    // Per-layer bookkeeping, read by `commit(into:layer:)`.
+    private let measured = Locked<[String: CachedSize]>([:])
+    private let reusedPaths = Locked<Set<String>>([])
+    private var startEventID: UInt64 = 0
+    private var currentChanges: ChangeSet?
+    private var lastDiscovery: [String: DiscoveryUnit]?
+    public var reusedCount: Int { reusedPaths.value.count }
+
+    /// Builds the lookup for one layer: a cached size for each folder that hasn't changed since the
+    /// last scan of this layer, or nil to measure it. Falls back to measuring everything whenever the
+    /// journal can't vouch for the gap.
+    func prepareReuse(previous: Snapshot?, layer: ScanLayer) -> (String) -> SizeResult? {
+        measured.mutate { $0.removeAll() }
+        reusedPaths.mutate { $0.removeAll() }
+        startEventID = ChangeJournal.currentEventID()
+        currentChanges = nil
+        lastDiscovery = nil
+        let none: (String) -> SizeResult? = { _ in nil }
+        guard !forceFresh, let prev = previous, let cache = prev.sizeCache,
+              let since = prev.layerEvents?[layer.rawValue], since > 0,
+              let date = prev.layerDates[layer.rawValue], Date().timeIntervalSince(date) < cacheMaxAge,
+              let id = prev.journalID, id == ChangeJournal.journalID(),
+              let changes = ChangeJournal.changes(since: since, roots: [NSHomeDirectory(), "/Applications", "/opt/homebrew"])
+        else { return none }
+        currentChanges = changes
+        return { path in
+            guard !changes.isDirty(path), let c = cache[path] else { return nil }
+            return SizeResult(bytes: c.bytes, files: c.files, newest: c.newest, denied: false)
+        }
+    }
+
+    func record(_ path: String, _ r: SizeResult, reused: Bool) {
+        guard !r.denied, !isCancelled else { return }
+        measured.mutate { $0[path] = CachedSize(bytes: r.bytes, files: r.files, newest: r.newest) }
+        if reused { reusedPaths.mutate { $0.insert(path) } }
+    }
+
+    func wasReused(_ path: String) -> Bool { reusedPaths.value.contains(path) }
+
+    /// Saves this layer's sizes and journal position into the snapshot. Call after a layer finishes.
+    public func commit(into snap: inout Snapshot, layer: ScanLayer) {
+        guard !isCancelled else { return }
+        var cache = snap.sizeCache ?? [:]
+        for (k, v) in measured.value { cache[k] = v }
+        snap.sizeCache = cache
+        snap.layerEvents = (snap.layerEvents ?? [:]).merging([layer.rawValue: startEventID]) { $1 }
+        snap.journalID = ChangeJournal.journalID()
+        if layer == .projects, let d = lastDiscovery, !d.isEmpty { snap.discoveryCache = d }
+    }
+
     public func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
     public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
     func resetCancel() { lock.lock(); _cancelled = false; lock.unlock() }
@@ -137,7 +193,7 @@ public final class ScanEngine: @unchecked Sendable {
     }
 
     /// Size jobs with bounded concurrency and report progress weighted by previous sizes.
-    private func run(_ jobs: [Job], tracker: ProgressTracker,
+    private func run(_ jobs: [Job], tracker: ProgressTracker, reuse: @escaping (String) -> SizeResult? = { _ in nil },
                      largeFile: ((String, Int64, TimeInterval) -> Void)? = nil) async -> [Finding] {
         let results = Locked<[Int: Finding]>([:])
         let sem = DispatchSemaphore(value: concurrency)
@@ -150,9 +206,11 @@ public final class ScanEngine: @unchecked Sendable {
                 queue.async {
                     defer { sem.signal(); group.leave() }
                     guard !self.isCancelled else { return }
-                    let r = DiskSizer.size(job.path, cancelled: { self.isCancelled },
-                                           progress: { b, _ in tracker.update(i, bytes: b, path: job.path) },
-                                           largeFile: largeFile, largeThreshold: self.largeFileThreshold)
+                    let cached = reuse(job.path)
+                    let r = cached ?? DiskSizer.size(job.path, cancelled: { self.isCancelled },
+                                                     progress: { b, _ in tracker.update(i, bytes: b, path: job.path) },
+                                                     largeFile: largeFile, largeThreshold: self.largeFileThreshold)
+                    self.record(job.path, r, reused: cached != nil)
                     tracker.finish(i, bytes: r.bytes)
                     if let f = job.make(r) { results.mutate { $0[i] = f } }
                 }
@@ -190,7 +248,8 @@ public final class ScanEngine: @unchecked Sendable {
         let prev = Dictionary((previous?.findings ?? []).map { ($0.path, $0.bytes) }, uniquingKeysWith: max)
         let tracker = ProgressTracker(layer: .quick, phase: "Sizing \(jobs.count) known locations", expected: jobs.map { prev[$0.path] }, sink: progress)
         tracker.emit(force: true)
-        return await run(jobs, tracker: tracker)
+        let reuse = prepareReuse(previous: previous, layer: .quick)
+        return await run(jobs, tracker: tracker, reuse: reuse)
     }
 
     private func appCacheJobs(running: Set<String>) -> [Job] {
@@ -261,13 +320,14 @@ public final class ScanEngine: @unchecked Sendable {
 
     // MARK: Layer 2 — projects
 
-    public func projects(previous: Snapshot?, roots: [String] = [NSHomeDirectory()], activeDays: Int = 14,
+    public func projects(previous: Snapshot?, roots: [String] = [NSHomeDirectory()], activeDays: Int = 30,
                          progress: @escaping @Sendable (ScanProgress) -> Void) async -> ProjectScanResult {
         resetCancel()
         let tracker = ProgressTracker(layer: .projects, phase: "Finding projects", expected: [], sink: progress)
         tracker.historyDuration = previous?.layerDurations[ScanLayer.projects.rawValue]
         let scanner = ProjectScanner()
         scanner.activeDays = activeDays
+        let reuse = prepareReuse(previous: previous, layer: .projects)
         return await withCheckedContinuation { cont in
             queue.async {
                 var dirs = 0
@@ -285,11 +345,15 @@ public final class ScanEngine: @unchecked Sendable {
                     let i = sized
                     sized += 1
                     tracker.setPhase("Sizing build folders (\(sized)/\(artifactCount))", path: path)
-                    let r = DiskSizer.size(path, cancelled: { self.isCancelled },
-                                           progress: { b, _ in tracker.update(i, bytes: b, path: path) })
+                    let cached = reuse(path)
+                    let r = cached ?? DiskSizer.size(path, cancelled: { self.isCancelled },
+                                                     progress: { b, _ in tracker.update(i, bytes: b, path: path) })
+                    self.record(path, r, reused: cached != nil)
                     tracker.finish(i, bytes: r.bytes)
                     return r
-                })
+                }, changes: self.currentChanges, discoveryCache: self.currentChanges == nil ? [:] : (previous?.discoveryCache ?? [:]),
+                   previousProjects: self.currentChanges == nil ? [] : (previous?.projects ?? []))
+                self.lastDiscovery = result.discovery
                 cont.resume(returning: result)
             }
         }
@@ -341,19 +405,21 @@ public final class ScanEngine: @unchecked Sendable {
                                usedFor: name, owner: nil, action: .none, layer: .full)
             })
         }
+        jobs += leftoverJobs(running: running)
+        jobs += installerJobs()
         // Applications, with last-opened date from Spotlight.
         for app in DiskSizer.children("/Applications") where app.hasSuffix(".app") && !DiskSizer.isSymlink(app) {
             jobs.append(Job(path: app) { r in
                 guard r.bytes >= 100_000_000 else { return nil }
                 let name = app.lastComponent.replacingOccurrences(of: ".app", with: "")
-                let used = SystemProbe.lastUsed(app: app)
-                let days = used.map { Int(Date().timeIntervalSince($0) / 86_400) }
                 let exe = Bundle(path: app)?.executableURL?.lastPathComponent
                 let open = running.contains(name) || exe.map(running.contains) == true
+                let used = open ? Date() : SystemProbe.lastUsed(app: app)
+                let days = used.map { Int(Date().timeIntervalSince($0) / 86_400) }
                 let unused = days.map { $0 > 180 } ?? false
                 return Finding(path: app, title: name, category: .apps, safety: unused ? .check : .yours, bytes: r.bytes, files: r.files,
                                lastModified: used,
-                               reason: used == nil ? "Never opened according to Spotlight." : "Last opened \(Format.age(used)).",
+                               reason: open ? "Open right now." : used == nil ? "No record of it being used on this Mac." : "Last used \(Format.age(used)).",
                                usedFor: "Application.", owner: name, rebuild: "Reinstall from the developer or App Store.", action: .trash,
                                lockedReason: open ? "\(name) is running." : nil, layer: .full)
             })
@@ -372,7 +438,8 @@ public final class ScanEngine: @unchecked Sendable {
         tracker.emit(force: true)
         let large = Locked<[Finding]>([])
         let skipLarge = [home + "/Library", home + "/.Trash", "/opt/homebrew", "/Applications"]
-        var findings = await run(jobs, tracker: tracker) { path, bytes, mtime in
+        let reuse = prepareReuse(previous: previous, layer: .full)
+        var findings = await run(jobs, tracker: tracker, reuse: reuse) { path, bytes, mtime in
             guard !skipLarge.contains(where: path.hasPrefix), !path.contains("/node_modules/"), !path.contains(".photoslibrary/") else { return }
             let date = Date(timeIntervalSince1970: mtime)
             large.mutate {
@@ -382,18 +449,97 @@ public final class ScanEngine: @unchecked Sendable {
                                   action: .trash, layer: .full))
             }
         }
+        // Folders taken from the cache weren't walked, so keep the large files found in them last time.
+        let carried = (previous?.findings ?? []).filter { f in
+            f.layer == .full && f.category == .downloads && f.files == 1 && f.reason.hasPrefix("Single large file")
+                && jobs.contains { wasReused($0.path) && f.path.hasPrefix($0.path + "/") } && DiskSizer.exists(f.path)
+        }
+        large.mutate { $0 += carried }
         findings += large.value
-        findings += oldDownloads(skipping: Set(large.value.map(\.path)))
+        findings += oldDownloads(skipping: Set(large.value.map(\.path)).union(findings.map(\.path)), reuse: reuse)
         return findings
     }
 
+    // MARK: Leftovers and installers
+
+    /// Data that apps you've removed left behind: containers, caches, preferences and saved state
+    /// named after a bundle ID that no installed app owns. Apple's own, shared group containers,
+    /// app extensions of installed apps and anything running are skipped.
+    private func leftoverJobs(running: Set<String>) -> [Job] {
+        let lib = NSHomeDirectory() + "/Library"
+        var installed = Set<String>()
+        for dir in ["/Applications", "/Applications/Utilities", NSHomeDirectory() + "/Applications", "/System/Applications"] {
+            for app in DiskSizer.children(dir) where app.hasSuffix(".app") {
+                if let id = Bundle(path: app)?.bundleIdentifier { installed.insert(Self.family(id)) }
+            }
+        }
+        func orphan(_ id: String) -> Bool {
+            let parts = id.split(separator: ".")
+            guard parts.count >= 3, !id.hasPrefix("com.apple."), !id.hasPrefix("group."),
+                  !installed.contains(Self.family(id)),
+                  NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) == nil else { return false }
+            return !running.contains { $0.lowercased() == String(parts.last!).lowercased() }
+        }
+        var jobs: [Job] = []
+        let places: [(dir: String, suffix: String, what: String)] = [
+            ("\(lib)/Containers", "", "sandbox container (documents, settings, caches)"),
+            ("\(lib)/HTTPStorages", "", "web cookies and cache"),
+            ("\(lib)/WebKit", "", "web view data"),
+            ("\(lib)/Saved Application State", ".savedState", "saved windows"),
+            ("\(lib)/Preferences", ".plist", "settings"),
+        ]
+        for place in places {
+            for path in DiskSizer.children(place.dir) where !DiskSizer.isSymlink(path) {
+                var id = path.lastComponent
+                if !place.suffix.isEmpty {
+                    guard id.hasSuffix(place.suffix) else { continue }
+                    id.removeLast(place.suffix.count)
+                }
+                guard orphan(id) else { continue }
+                jobs.append(Job(path: path) { r in
+                    guard r.bytes >= 5_000_000 else { return nil }
+                    return Finding(path: path, title: "Leftover: \(id)", category: .apps, safety: .check, bytes: r.bytes, files: r.files,
+                                   lastModified: r.newestDate,
+                                   reason: "The \(place.what) of \(id), an app that is no longer installed. macOS never removes it when an app is dragged to the Trash.",
+                                   usedFor: "Nothing, unless you reinstall that app and want its old settings back.", owner: id,
+                                   rebuild: "Reinstalling the app starts fresh.", action: .trash, layer: .full)
+                })
+            }
+        }
+        return jobs
+    }
+
+    /// "com.microsoft.Excel.ShareExtension" and "com.microsoft.Excel" are one family.
+    static func family(_ id: String) -> String { id.lowercased().split(separator: ".").prefix(3).joined(separator: ".") }
+
+    /// Disk images and installer packages in Downloads and Desktop. Once the app is installed they're dead weight.
+    private func installerJobs() -> [Job] {
+        let exts: Set<String> = ["dmg", "pkg", "mpkg", "iso", "xip"]
+        var jobs: [Job] = []
+        for dir in ["~/Downloads", "~/Desktop"].map(\.expandingTilde) {
+            for path in DiskSizer.children(dir) where exts.contains((path as NSString).pathExtension.lowercased()) && !DiskSizer.isSymlink(path) {
+                jobs.append(Job(path: path) { r in
+                    guard r.bytes >= 10_000_000 else { return nil }
+                    return Finding(path: path, title: path.lastComponent, category: .downloads, safety: .check, bytes: r.bytes, files: r.files,
+                                   lastModified: r.newestDate,
+                                   reason: "Installer file. Once the app is installed, the installer isn't needed any more.",
+                                   usedFor: "Installing or reinstalling an app.", owner: dir.lastComponent,
+                                   rebuild: "Download it again from the developer if you ever need it.", action: .trash, layer: .full)
+                })
+            }
+        }
+        return jobs
+    }
+
     /// Items in ~/Downloads not modified for `oldDownloadDays`.
-    private func oldDownloads(skipping: Set<String>) -> [Finding] {
+    private func oldDownloads(skipping: Set<String>, reuse: (String) -> SizeResult?) -> [Finding] {
         let now = Date()
         return DiskSizer.children("~/Downloads".expandingTilde).compactMap { path in
             guard !skipping.contains(path), !DiskSizer.isSymlink(path), let m = DiskSizer.mtime(path),
                   now.timeIntervalSince(m) > Double(oldDownloadDays) * 86_400 else { return nil }
-            let r = DiskSizer.size(path, cancelled: { self.isCancelled })
+            let cached = reuse(path)
+            let r = cached ?? DiskSizer.size(path, cancelled: { self.isCancelled })
+            record(path, r, reused: cached != nil)
             guard r.bytes >= 20_000_000 else { return nil }
             return Finding(path: path, title: path.lastComponent, category: .downloads, safety: .yours, bytes: r.bytes, files: r.files,
                            lastModified: m, reason: "In Downloads and untouched for \(Format.age(m).replacingOccurrences(of: " ago", with: "")).",

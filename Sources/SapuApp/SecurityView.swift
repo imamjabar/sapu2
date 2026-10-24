@@ -82,7 +82,7 @@ struct VersionCard: View {
                 .frame(width: 110, alignment: .leading)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(finding.source).font(.callout.weight(.semibold)).lineLimit(2)
-                    Text(finding.message).font(.callout).foregroundStyle(.secondary).lineLimit(3)
+                    Text(finding.message).font(.callout).foregroundStyle(.primary.opacity(0.72)).lineLimit(3)
                     if let fix = finding.fix {
                         Label(fix, systemImage: "arrow.up.circle.fill").font(.callout.weight(.medium)).foregroundStyle(tint)
                             .padding(.top, 2)

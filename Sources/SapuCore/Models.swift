@@ -195,6 +195,12 @@ public struct VolumeInfo: Codable, Sendable, Hashable {
     public var used: Int64 { total - free }
 }
 
+public struct CachedSize: Codable, Sendable, Hashable {
+    public var bytes: Int64
+    public var files: Int
+    public var newest: TimeInterval
+}
+
 public struct Snapshot: Codable, Sendable {
     public var findings: [Finding] = []
     public var projects: [Project] = []
@@ -202,6 +208,12 @@ public struct Snapshot: Codable, Sendable {
     public var volume: VolumeInfo?
     public var layerDates: [Int: Date] = [:]
     public var layerDurations: [Int: TimeInterval] = [:]
+    /// Last measured size of every scanned folder, reused when the change journal says it didn't change.
+    public var sizeCache: [String: CachedSize]?
+    /// FSEvents ID at the start of each layer's last scan.
+    public var layerEvents: [Int: UInt64]?
+    public var journalID: String?
+    public var discoveryCache: [String: DiscoveryUnit]?
     public init() {}
 
     public func findings(in layer: ScanLayer) -> [Finding] { findings.filter { $0.layer == layer } }

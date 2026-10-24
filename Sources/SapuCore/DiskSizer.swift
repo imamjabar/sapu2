@@ -35,6 +35,23 @@ public enum DiskSizer {
             return result
         }
 
+        if useBulk, let bulk = bulkSize(path, rootDev: lst.st_dev, cancelled: cancelled, progress: progress,
+                                         largeFile: largeFile, largeThreshold: largeThreshold) {
+            return bulk
+        }
+        return ftsSize(path, cancelled: cancelled, progress: progress, largeFile: largeFile, largeThreshold: largeThreshold)
+    }
+
+    /// `getattrlistbulk` is the default; set false to compare against the fts walker.
+    nonisolated(unsafe) public static var useBulk = true
+
+    /// Reference walker: one lstat per file via fts(3).
+    public static func ftsSize(_ path: String,
+                               cancelled: () -> Bool = { false },
+                               progress: ((Int64, Int) -> Void)? = nil,
+                               largeFile: ((String, Int64, TimeInterval) -> Void)? = nil,
+                               largeThreshold: Int64 = 1_000_000_000) -> SizeResult {
+        var result = SizeResult()
         guard let cPath = strdup(path) else { return result }
         defer { free(cPath) }
         var argv: [UnsafeMutablePointer<CChar>?] = [cPath, nil]
@@ -68,6 +85,86 @@ public enum DiskSizer {
                 if ent.pointee.fts_level == 0 { result.denied = true }
             default:
                 break
+            }
+        }
+        return result
+    }
+
+    /// Fast walker: `getattrlistbulk(2)` returns name, type, size, mtime and inode for a whole batch of
+    /// directory entries per syscall, instead of one lstat per file. Same rules as the fts walker:
+    /// never follows symlinks, stays on one volume, counts hardlinks once, constant memory per level.
+    /// Returns nil if the root can't be read this way, so the caller falls back to fts.
+    static func bulkSize(_ root: String, rootDev: dev_t,
+                         cancelled: () -> Bool,
+                         progress: ((Int64, Int) -> Void)?,
+                         largeFile: ((String, Int64, TimeInterval) -> Void)?,
+                         largeThreshold: Int64) -> SizeResult? {
+        var req = attrlist()
+        req.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        // Order in the buffer follows bit order: name, devid, objtype, modtime, fileid; then linkcount, allocsize.
+        req.commonattr = 0x8000_0000 /* RETURNED_ATTRS */ | 0x1 /* NAME */ | 0x2 /* DEVID */ | 0x8 /* OBJTYPE */
+            | 0x400 /* MODTIME */ | 0x0200_0000 /* FILEID */
+        req.fileattr = 0x1 /* LINKCOUNT */ | 0x4 /* ALLOCSIZE */
+        let options = UInt64(0x1 /* FSOPT_NOFOLLOW */ | 0x8 /* FSOPT_PACK_INVAL_ATTRS */)
+
+        let bufSize = 128 * 1024
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: bufSize, alignment: 16)
+        defer { buf.deallocate() }
+
+        var result = SizeResult()
+        var seenLinks = Set<UInt64>()
+        var stack = [root]
+        var visited = 0
+        var first = true
+        while let dir = stack.popLast() {
+            let fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if fd < 0 {
+                if first { return nil }
+                continue
+            }
+            first = false
+            defer { close(fd) }
+            while true {
+                let n = getattrlistbulk(fd, &req, buf, bufSize, options)
+                if n <= 0 { break }
+                var entry = UnsafeRawPointer(buf)
+                for _ in 0..<n {
+                    let length = Int(entry.loadUnaligned(as: UInt32.self))
+                    defer { entry = entry + length }
+                    visited += 1
+                    if visited & 4095 == 0 {
+                        if cancelled() { return result }
+                        progress?(result.bytes, result.files)
+                    }
+                    let nameRef = entry + 24
+                    let nameOff = Int(nameRef.loadUnaligned(as: Int32.self))
+                    let nameLen = Int(nameRef.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
+                    let dev = entry.loadUnaligned(fromByteOffset: 32, as: Int32.self)
+                    let type = entry.loadUnaligned(fromByteOffset: 36, as: UInt32.self)
+                    let mtime = TimeInterval(entry.loadUnaligned(fromByteOffset: 40, as: Int.self))
+                    let fileID = entry.loadUnaligned(fromByteOffset: 56, as: UInt64.self)
+                    let links = entry.loadUnaligned(fromByteOffset: 64, as: UInt32.self)
+                    let alloc = entry.loadUnaligned(fromByteOffset: 68, as: Int64.self)
+
+                    if type == 2 /* VDIR */ {
+                        guard dev == rootDev, nameLen > 1 else { continue }
+                        let name = String(cString: (nameRef + nameOff).assumingMemoryBound(to: CChar.self))
+                        if neverEnter.contains(name) { continue }
+                        stack.append(dir + "/" + name)
+                        continue
+                    }
+                    if links > 1 {
+                        let key = fileID ^ (UInt64(UInt32(bitPattern: dev)) << 40)
+                        if !seenLinks.insert(key).inserted { continue }
+                    }
+                    result.bytes += alloc
+                    result.files += 1
+                    if mtime > result.newest { result.newest = mtime }
+                    if alloc >= largeThreshold, let largeFile {
+                        let name = String(cString: (nameRef + nameOff).assumingMemoryBound(to: CChar.self))
+                        largeFile(dir + "/" + name, alloc, mtime)
+                    }
+                }
             }
         }
         return result

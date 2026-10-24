@@ -33,6 +33,7 @@ func runScan(_ layers: [ScanLayer]) async {
     var snap = Store.load() ?? Snapshot()
     snap.volume = SystemProbe.volume()
     let engine = ScanEngine()
+    engine.forceFresh = args.contains("--fresh")
     signal(SIGINT, SIG_IGN)
     let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     sigint.setEventHandler { err("\ncancelling…"); engine.cancel() }
@@ -50,7 +51,9 @@ func runScan(_ layers: [ScanLayer]) async {
             snap.replace(layer: .full, with: await engine.full(previous: snap, progress: progressLine))
         }
         let took = Date().timeIntervalSince(start)
-        err("\r\u{1B}[K✓ \(layer.name) in \(Format.duration(took))\(engine.isCancelled ? " (cancelled)" : "")")
+        engine.commit(into: &snap, layer: layer)
+        let reused = engine.reusedCount > 0 ? " · \(engine.reusedCount) unchanged folders reused" : ""
+        err("\r\u{1B}[K✓ \(layer.name) in \(Format.duration(took))\(reused)\(engine.isCancelled ? " (cancelled)" : "")")
         if engine.isCancelled { break }
         snap.layerDates[layer.rawValue] = Date()
         snap.layerDurations[layer.rawValue] = took
@@ -137,6 +140,20 @@ func selftest() -> Int32 {
     check(VersionAudit.evaluateConstraint(product: "php", constraint: "^7.3", projects: ["a"], cycles: php, now: now)?.level == .eol, "^7.3 flagged EOL")
     check(VersionAudit.evaluateConstraint(product: "php", constraint: "^7.3|^8.0", projects: ["a"], cycles: php, now: now) == nil, "^7.3|^8.0 not flagged")
 
+    // A workspace (README + several components, or a root manifest) is one project, not one per component.
+    let ws = root + "/area/ws"
+    for c in ["a", "b", "c/nested"] {
+        try? fm.createDirectory(atPath: "\(ws)/\(c)", withIntermediateDirectories: true)
+        fm.createFile(atPath: "\(ws)/\(c)/package.json", contents: Data("{}".utf8))
+    }
+    fm.createFile(atPath: ws + "/README.md", contents: Data("# ws".utf8))
+    let wr = ProjectScanner().scan(roots: [root], cancelled: { false }, onDiscover: { _ in }, onArtifactsFound: { _ in }, sizeArtifact: { DiskSizer.size($0) })
+    check(wr.projects.map(\.path).filter { $0.hasPrefix(root + "/area") } == [ws], "workspace with README groups its components (\(wr.projects.count) project)")
+
+    // The fast sizer and the reference walker agree byte for byte.
+    let fast = DiskSizer.size(root + "/proj"), ref = DiskSizer.ftsSize(root + "/proj")
+    check(fast.bytes == ref.bytes && fast.files == ref.files, "getattrlistbulk sizer matches fts (\(fast.files) files)")
+
     // Log truncation keeps the file.
     let log = root + "/svc.log"
     fm.createFile(atPath: log, contents: Data(count: 10_000))
@@ -169,6 +186,25 @@ case "versions":
     }
 case "selftest":
     exit(selftest())
+case "bench":
+    // sapu-cli bench <path>…  compare the getattrlistbulk sizer with the fts reference walker.
+    for path in args.dropFirst().map(\.expandingTilde) {
+        func timed(_ f: () -> SizeResult) -> (SizeResult, Double) {
+            let t = Date(); let r = f(); return (r, Date().timeIntervalSince(t))
+        }
+        // Warm the cache once, then best of three for each, so neither walker gets a warmer cache.
+        _ = DiskSizer.ftsSize(path)
+        var (bulk, tb) = timed { DiskSizer.size(path) }
+        var (fts, tf) = timed { DiskSizer.ftsSize(path) }
+        for _ in 0..<2 {
+            let b = timed { DiskSizer.size(path) }; if b.1 < tb { (bulk, tb) = b }
+            let f = timed { DiskSizer.ftsSize(path) }; if f.1 < tf { (fts, tf) = f }
+        }
+        let same = fts.bytes == bulk.bytes && fts.files == bulk.files
+        print("\(path.tildePath)\n  fts  \(Format.bytes(fts.bytes)) \(fts.files) files \(String(format: "%.2f", tf)) s"
+              + "\n  bulk \(Format.bytes(bulk.bytes)) \(bulk.files) files \(String(format: "%.2f", tb)) s"
+              + "  → \(String(format: "%.1f", tf / max(tb, 0.0001)))× \(same ? "identical" : "DIFFERENT (\(bulk.bytes - fts.bytes) B, \(bulk.files - fts.files) files)")")
+    }
 default:
     print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | selftest")
 }

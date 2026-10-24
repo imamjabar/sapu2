@@ -26,6 +26,10 @@ Sapu never walks your whole disk on every launch. It scans in three layers, each
 
 The engine streams folders with `fts(3)` and keeps memory constant (no per-file lists). At most two folders are measured at once, at utility priority. It never follows symlinks, never crosses into other volumes, and never opens iCloud/CloudStorage folders, because reading them can trigger downloads.
 
+**Rescans only re-read what changed.** macOS keeps a per-volume change journal (FSEvents, the same history Time Machine and Spotlight use). Sapu records its position after each layer; the next scan asks the journal which folders changed since then, even if Sapu was closed, and reuses the cached size of every folder that didn't. If the journal can't vouch for the gap (dropped events, reset journal, cache older than 7 days), Sapu measures everything. **Scan › Full rescan** ignores the cache on demand. On a test Mac a fresh scan and a cached rescan found the same 264 items and 81 projects, within 2.5 MB of 174.65 GB. The only difference was a browser cache written to between the two runs. Rescan times went from 4 s → 2 s (Quick), 42 s → 11 s (Projects) and 46 s → 4–22 s (Full map).
+
+Folders are measured with `getattrlistbulk(2)`, which returns sizes for a whole directory batch per system call instead of one `lstat` per file. Results match the `fts` reference walker byte for byte (`sapu-cli bench <path>` checks it).
+
 **Real time estimates.** Progress is weighted by how big each location was in your last scan, so "about 12 s left" reflects bytes still to read, not a count of folders. On a first scan the estimate is labelled as rough.
 
 ### Explains every item
@@ -37,8 +41,20 @@ Each item shows:
 
 Items are labelled **Safe** (rebuilds itself), **Check first** (slow re-download, no lockfile, recently touched), **Your files** (never pre-selected) or **Protected** (shown, never touched).
 
+### What counts as a project
+Sapu groups folders the way IDEs do, so a monorepo or a downloaded example collection is one project, not dozens:
+1. A **git repository** is one project, including everything nested in it.
+2. Without git, a component joins the outermost folder above it that is itself a project: it has a manifest, a workspace file (`pnpm-workspace.yaml`, `go.work`, `docker-compose.yml`, `*.code-workspace`…), or a README with two or more components under it.
+3. A folder like `~/Machine Learning/Campus Intelligence` that holds its own notes or docs plus two or more components is one workspace.
+4. Containers are never merged: `~/Sites`, `~/Documents`, `Projects`, `GitHub` and other folders directly under home.
+
+### Apps, leftovers and installers
+- **Last used** combines Spotlight's date with the app's own preferences and saved-window state. Spotlight alone misses apps like Microsoft Office. An app that's open counts as used now.
+- **Leftovers:** containers, web data, saved state and settings named after an app that is no longer installed. App extensions of installed apps and Apple's own data are skipped.
+- **Installers:** `.dmg`, `.pkg`, `.iso` and `.xip` files in Downloads and Desktop.
+
 ### Protects the projects you're working on
-A project edited in the last 14 days (configurable) is **Active**. Its `node_modules`, venvs and build folders are locked, so you keep developing fast. Projects with uncommitted changes are never marked Safe, and the app warns about repos with commits that exist on no remote before you move anything.
+A project touched in the last 30 days (configurable) is **Active**. Its `node_modules`, venvs and build folders are locked, so you keep developing fast. Projects with uncommitted changes are never marked Safe, and the app warns about repos with commits that exist on no remote before you move anything.
 
 ### Security and versions (CVE warnings)
 Sapu checks installed runtimes (PHP from Homebrew and MAMP, Node via nvm, Python and conda envs, Go, Ruby) and the versions your projects declare (`composer.json`, `composer.lock` Laravel, `package.json` engines, `.nvmrc`, `.python-version`, `go.mod`) against endoflife.date:
