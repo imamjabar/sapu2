@@ -150,6 +150,24 @@ func selftest() -> Int32 {
     let wr = ProjectScanner().scan(roots: [root], cancelled: { false }, onDiscover: { _ in }, onArtifactsFound: { _ in }, sizeArtifact: { DiskSizer.size($0) })
     check(wr.projects.map(\.path).filter { $0.hasPrefix(root + "/area") } == [ws], "workspace with README groups its components (\(wr.projects.count) project)")
 
+    // A renamed node_modules is one item, and nothing inside a dependency tree is listed on its own.
+    // PyInstaller (a .spec next to build/dist) and dbt (dbt_project.yml next to target) are recognised.
+    let kinds = root + "/kinds"
+    for d in ["old/node_modules-lama/pkg/dist", "old/node_modules-lama/pkg/node_modules/dep", "pyapp/build/pyapp", "pyapp/dist/pyapp", "dbt/target"] {
+        try? fm.createDirectory(atPath: "\(kinds)/\(d)", withIntermediateDirectories: true)
+    }
+    fm.createFile(atPath: kinds + "/old/package.json", contents: Data("{}".utf8))
+    fm.createFile(atPath: kinds + "/old/node_modules-lama/pkg/package.json", contents: Data("{}".utf8))
+    fm.createFile(atPath: kinds + "/pyapp/pyapp.spec", contents: Data("a".utf8))
+    fm.createFile(atPath: kinds + "/dbt/dbt_project.yml", contents: Data("name: x".utf8))
+    for f in ["old/node_modules-lama/pkg/dist/x.js", "pyapp/build/pyapp/x", "pyapp/dist/pyapp/x", "dbt/target/x.sql"] {
+        fm.createFile(atPath: "\(kinds)/\(f)", contents: Data(count: 1_500_000))
+    }
+    let kr = ProjectScanner().scan(roots: [root], cancelled: { false }, onDiscover: { _ in }, onArtifactsFound: { _ in }, sizeArtifact: { DiskSizer.size($0) })
+    let kpaths = Set(kr.findings.map(\.path).filter { $0.hasPrefix(kinds) })
+    check(kpaths == [kinds + "/old/node_modules-lama", kinds + "/pyapp/build", kinds + "/pyapp/dist", kinds + "/dbt/target"],
+          "renamed node_modules is one item; PyInstaller and dbt output found (\(kpaths.count) items)")
+
     // The fast sizer and the reference walker agree byte for byte.
     let fast = DiskSizer.size(root + "/proj"), ref = DiskSizer.ftsSize(root + "/proj")
     check(fast.bytes == ref.bytes && fast.files == ref.files, "getattrlistbulk sizer matches fts (\(fast.files) files)")

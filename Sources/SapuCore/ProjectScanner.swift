@@ -7,6 +7,8 @@ struct ArtifactKind: Sendable {
     var ecosystem: String
     /// Any of these next to the folder makes it this kind.
     var markers: [String]
+    /// Any file with one of these suffixes next to the folder also makes it this kind (e.g. `.spec`).
+    var markerSuffixes: [String] = []
     var lockfiles: [String]
     /// Required inside the folder (e.g. `pyvenv.cfg` for virtualenvs).
     var inside: String? = nil
@@ -53,6 +55,14 @@ public final class ProjectScanner: @unchecked Sendable {
         ArtifactKind(names: [".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".angular", ".expo", ".astro", ".vercel"],
                      ecosystem: "Node", markers: ["package.json"], lockfiles: ["package.json"],
                      usedFor: "Framework build cache / dev-server output.", rebuild: "Recreated by the next dev or build run."),
+        ArtifactKind(names: ["build"], ecosystem: "PyInstaller", markers: [], markerSuffixes: [".spec"], lockfiles: [],
+                     usedFor: "PyInstaller work folder: analysed imports and partial bundles from the last build.",
+                     rebuild: "pyinstaller <name>.spec"),
+        ArtifactKind(names: ["dist"], ecosystem: "PyInstaller", markers: [], markerSuffixes: [".spec"], lockfiles: [],
+                     defaultSafety: .check, usedFor: "The packaged app PyInstaller built. Keep it if this is the copy you share.",
+                     rebuild: "pyinstaller <name>.spec"),
+        ArtifactKind(names: ["target", "dbt_packages"], ecosystem: "dbt", markers: ["dbt_project.yml"], lockfiles: [],
+                     usedFor: "Compiled SQL, run results and installed dbt packages.", rebuild: "dbt deps && dbt compile"),
         ArtifactKind(names: ["dist", "out"], ecosystem: "Node", markers: ["package.json"], lockfiles: ["package.json"],
                      defaultSafety: .check, usedFor: "Built output. Sometimes it is the thing you deploy.", rebuild: "npm run build"),
         ArtifactKind(names: ["build", ".gradle"], ecosystem: "Android/Gradle", markers: ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
@@ -71,6 +81,15 @@ public final class ProjectScanner: @unchecked Sendable {
     ]
 
     static let artifactNames: Set<String> = Set(kinds.flatMap(\.names))
+
+    /// A renamed copy of node_modules (node_modules-old, node_modules.bak…). Nothing loads it.
+    static let renamedNodeModules = ArtifactKind(
+        names: [], ecosystem: "Node", markers: [], lockfiles: [], defaultSafety: .check,
+        usedFor: "A renamed copy of node_modules, usually a backup made before reinstalling. Node never loads it.",
+        rebuild: "npm install recreates node_modules from package.json.")
+
+    /// Dependency trees are one item: never list folders inside them separately.
+    static func isDependencyTree(_ name: String) -> Bool { name.hasPrefix("node_modules") }
 
     static let markers: Set<String> = [
         "package.json", "composer.json", "pyproject.toml", "requirements.txt", "setup.py", "go.mod", "Cargo.toml",
@@ -96,6 +115,9 @@ public final class ProjectScanner: @unchecked Sendable {
     /// Folders never worth descending into.
     static let skipAnywhere: Set<String> = [".git", ".hg", ".svn", "__pycache__", ".idea", ".vscode", ".DS_Store", "site-packages"]
     static let bundleSuffixes = [".app", ".photoslibrary", ".fcpbundle", ".musiclibrary", ".logicx", ".imovielibrary", ".xcarchive", ".framework", ".bundle"]
+
+    /// Bump when artifact or project rules change, so cached discovery is not reused.
+    public static let rulesVersion = 2
 
     public init() {}
 
@@ -265,10 +287,11 @@ public final class ProjectScanner: @unchecked Sendable {
                     gitRoots.insert(path.parentPath); note { $0.gitRoots.append(path.parentPath) }
                     fts_set(fts, ent, FTS_SKIP); continue
                 }
-                if Self.artifactNames.contains(name), kind(for: path) != nil {
+                if Self.artifactNames.contains(name) || Self.isDependencyTree(name), kind(for: path) != nil {
                     candidates.append(path); note { $0.candidates.append(path) }
                     fts_set(fts, ent, FTS_SKIP); continue
                 }
+                if Self.isDependencyTree(name) { fts_set(fts, ent, FTS_SKIP); continue }
                 if Self.skipAnywhere.contains(name) || DiskSizer.neverEnter.contains(name)
                     || Self.bundleSuffixes.contains(where: name.hasSuffix) || level >= maxDepth {
                     fts_set(fts, ent, FTS_SKIP); continue
@@ -297,9 +320,21 @@ public final class ProjectScanner: @unchecked Sendable {
     func kind(for path: String) -> ArtifactKind? {
         let name = path.lastComponent
         let parent = path.parentPath
+        if name != "node_modules" && Self.isDependencyTree(name) {
+            // Only a real npm tree: it has packages with a package.json or npm's own metadata.
+            let looksLikeTree = DiskSizer.exists(path + "/.package-lock.json") || DiskSizer.exists(path + "/.bin")
+                || DiskSizer.children(path, includeHidden: false).prefix(20).contains { DiskSizer.exists($0 + "/package.json") }
+            return looksLikeTree ? Self.renamedNodeModules : nil
+        }
+        var siblings: [String]?
         for k in Self.kinds where k.names.contains(name) {
             if let inside = k.inside {
                 if DiskSizer.exists(path + "/" + inside) { return k }
+                continue
+            }
+            if !k.markerSuffixes.isEmpty {
+                if siblings == nil { siblings = DiskSizer.children(parent, includeHidden: false).map(\.lastComponent) }
+                if siblings!.contains(where: { s in k.markerSuffixes.contains { s.hasSuffix($0) } }) { return k }
                 continue
             }
             if k.markers.isEmpty || k.markers.contains(where: { DiskSizer.exists(parent + "/" + $0) }) { return k }
@@ -365,7 +400,12 @@ public final class ProjectScanner: @unchecked Sendable {
 
         switch project.status {
         case .active: notes.append("You worked on \(project.name) \(days == 0 ? "today" : "\(days) days ago").")
-        case .recent: safety = max(safety, .check); notes.append("Last touched \(days) days ago.")
+        case .recent:
+            safety = max(safety, .check)
+            notes.append("Last touched \(days) days ago.")
+            if days >= staleDays, let dirty = project.git?.dirtyFiles, dirty > 0 {
+                notes.append("Kept as recent because \(project.name) has \(dirty) uncommitted file\(dirty == 1 ? "" : "s").")
+            }
         case .stale: notes.append("Idle for \(days >= 9_999 ? "a long time" : "\(days) days").")
         }
         if lock == nil && !a.kind.lockfiles.isEmpty {

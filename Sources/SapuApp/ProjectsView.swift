@@ -40,7 +40,7 @@ struct ProjectsView: View {
                             }
                         }
                         .width(min: 180, ideal: 260)
-                        TableColumn("Status") { p in StatusPill(status: p.status) }.width(70)
+                        TableColumn("Status") { p in StatusPill(status: p.status, uncommitted: p.keptForUncommittedWork) }.width(min: 70, ideal: 120)
                         TableColumn("Last activity") { p in Text(Format.age(p.lastActivity)).monospacedDigit() }.width(100)
                         TableColumn("Stack") { p in Text(p.kinds.joined(separator: ", ")).foregroundStyle(.secondary) }.width(min: 70, ideal: 110)
                         TableColumn("Git") { p in GitText(git: p.git) }.width(min: 80, ideal: 120)
@@ -58,9 +58,10 @@ struct ProjectsView: View {
 
 struct StatusPill: View {
     let status: ProjectStatus
+    var uncommitted = false
     var body: some View {
         let color: Color = status == .active ? .green : status == .recent ? .orange : .secondary
-        Text(status.label).font(.caption.weight(.medium)).padding(.horizontal, 6).padding(.vertical, 2)
+        Text(uncommitted ? "Uncommitted work" : status.label).font(.caption.weight(.medium)).padding(.horizontal, 6).padding(.vertical, 2)
             .foregroundStyle(color).background(color.opacity(0.12), in: Capsule())
     }
 }
@@ -88,7 +89,7 @@ struct ProjectDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text(project.name).font(.title3.weight(.semibold))
-                HStack { StatusPill(status: project.status); Text(Format.age(project.lastActivity)).foregroundStyle(.secondary) }
+                HStack { StatusPill(status: project.status, uncommitted: project.keptForUncommittedWork); Text(Format.age(project.lastActivity)).foregroundStyle(.secondary) }
                 if let g = project.git {
                     Label("\(g.branch ?? "?") · \(g.dirtyFiles) uncommitted · \(g.hasUpstream ? "\(g.ahead) unpushed" : "no upstream")", systemImage: "arrow.triangle.branch")
                         .font(.callout)

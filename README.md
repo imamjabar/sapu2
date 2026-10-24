@@ -53,6 +53,14 @@ Sapu groups folders the way IDEs do, so a monorepo or a downloaded example colle
 - **Leftovers:** containers, web data, saved state and settings named after an app that is no longer installed. App extensions of installed apps and Apple's own data are skipped.
 - **Installers:** `.dmg`, `.pkg`, `.iso` and `.xip` files in Downloads and Desktop.
 
+### Browsers, tools and build output
+
+- **Browsers** (Chrome, Arc, Brave, Edge, Vivaldi, Opera): only named cache folders per profile (page cache, service-worker cache, GPU and shader caches, downloaded components). Logins, history, bookmarks and extensions are never touched. Locked while the browser runs.
+- **Old tool versions:** Claude Code versions other than the one in use (and any a running process uses), Google Updater's installed packages, the PyInstaller cache. The previous Chrome version inside the app is shown with a hint to restart Chrome; Sapu does not edit files inside apps.
+- **App caches and logs** inside `~/Library/Application Support/<app>`.
+- **Build output:** PyInstaller `build`/`dist` (next to a `.spec`), dbt `target`/`dbt_packages`, and renamed dependency folders such as `node_modules-old`, listed as one item. Folders inside a dependency tree are never listed on their own.
+- Projects older than 90 days that are kept only because of uncommitted changes are labelled **Uncommitted work**.
+
 ### Protects the projects you're working on
 A project touched in the last 30 days (configurable) is **Active**. Its `node_modules`, venvs and build folders are locked, so you keep developing fast. Projects with uncommitted changes are never marked Safe, and the app warns about repos with commits that exist on no remote before you move anything.
 
