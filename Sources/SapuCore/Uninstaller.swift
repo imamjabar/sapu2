@@ -49,6 +49,8 @@ public struct UninstallPlan: Codable, Sendable, Identifiable {
     public var items: [UninstallItem]
     /// Why the app can't be removed here (system app, security agent, running).
     public var blocked: String?
+    /// False while sizes are still being counted (the list shows first, sizes follow).
+    public var sized = true
     public var totalBytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
     public var selectedBytes: Int64 { items.filter(\.selected).reduce(0) { $0 + $1.bytes } }
 }
@@ -158,6 +160,9 @@ public enum Uninstaller {
     ]
     /// Command-line tools that share a name with a desktop app (Claude Code vs Claude, Codex CLI vs Codex…).
     static let namesakeCLIs: Set<String> = ["claude", "opencode", "codex", "gemini", "cursor", "ollama", "docker", "code"]
+    /// Bundle-ID endings that name a kind of app, not the app (com.brave.Browser, org.jkiss.dbeaver.core.product).
+    static let genericLeaves: Set<String> = ["browser", "mac", "macos", "osx", "main", "core", "product", "application", "electron",
+                                             "release", "stable", "shell", "editor", "player", "viewer", "reader", "mail", "chat", "terminal"]
     /// Words too common to match folders by.
     static let commonNames: Set<String> = ["music", "notes", "photos", "finder", "safari", "preview", "calendar", "contacts", "messages",
                                            "reminders", "clock", "weather", "books", "news", "files", "store", "system", "helper",
@@ -166,18 +171,42 @@ public enum Uninstaller {
 
     // MARK: Plan
 
-    public static func plan(for app: InstalledApp, running: Set<String>) -> UninstallPlan {
-        var items = [UninstallItem(path: app.path, kind: .app, bytes: DiskSizer.size(app.path).bytes, selected: true, holdBack: false,
-                                   note: app.caskToken.map { "Removed with brew uninstall --cask \($0)." } ?? "Moved to the Trash.")]
-        for path in leftovers(for: app) {
+    /// `apps` is the installed list the caller already has; without it the Applications folder is read again.
+    public static func plan(for app: InstalledApp, running: Set<String>, apps: [InstalledApp]? = nil, sized: Bool = true) -> UninstallPlan {
+        let paths = [app.path] + leftovers(for: app, apps: apps ?? installedApps())
+        guard sized else {
+            let items = paths.enumerated().map { i, path -> UninstallItem in
+                let kind = i == 0 ? UninstallItem.Kind.app : classify(path), hold = i == 0 ? false : holdBack(path)
+                return UninstallItem(path: path, kind: kind, bytes: 0, selected: i == 0 || (!hold && (kind == .cache || kind == .agent)),
+                                     holdBack: hold, note: i == 0 ? appNote(app) : note(for: path, kind: kind, hold: hold))
+            }
+            var p = UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
+            p.sized = false
+            return p
+        }
+        // Sizing is most of the work (the app bundle alone can be 3 GB of small files): a few folders at a time.
+        let sizes = Locked([Int64](repeating: 0, count: paths.count))
+        DispatchQueue.concurrentPerform(iterations: paths.count) { i in
+            let b = DiskSizer.size(paths[i]).bytes
+            sizes.mutate { $0[i] = b }
+        }
+        let bytes = sizes.value
+        var items = [UninstallItem(path: app.path, kind: .app, bytes: bytes[0], selected: true, holdBack: false, note: appNote(app))]
+        for (i, path) in paths.enumerated().dropFirst() {
             let kind = classify(path)
             let hold = holdBack(path)
-            let size = DiskSizer.size(path).bytes
-            items.append(UninstallItem(path: path, kind: kind, bytes: size, selected: !hold && (kind == .cache || kind == .agent),
+            items.append(UninstallItem(path: path, kind: kind, bytes: bytes[i], selected: !hold && (kind == .cache || kind == .agent),
                                        holdBack: hold, note: note(for: path, kind: kind, hold: hold)))
         }
         return UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
     }
+
+    static func appNote(_ app: InstalledApp) -> String {
+        app.caskToken.map { "Removed with brew uninstall --cask \($0)." } ?? "Moved to the Trash."
+    }
+
+    /// Reads every app's helper IDs ahead of time, so the first plan opens without waiting.
+    public static func warm(_ apps: [InstalledApp]) { _ = othersIDs(excluding: "", apps: apps) }
 
     public static func classify(_ p: String) -> UninstallItem.Kind {
         if p.hasPrefix(lib + "/LaunchAgents/") { return .agent }
@@ -220,13 +249,24 @@ public enum Uninstaller {
         public var isDirectory: @Sendable (String) -> Bool
         public var isSymlink: @Sendable (String) -> Bool
         public var children: @Sendable (String) -> [String]
-        public var enumerate: @Sendable (String) -> FileManager.DirectoryEnumerator?
         public var agentProgram: @Sendable (String) -> String?
 
         public static let disk = FileView(exists: { DiskSizer.exists($0) }, isDirectory: { DiskSizer.isDirectory($0) },
                                           isSymlink: { DiskSizer.isSymlink($0) }, children: { DiskSizer.children($0) },
-                                          enumerate: { FileManager.default.enumerator(atPath: $0) },
                                           agentProgram: { Uninstaller.agentProgram($0) })
+
+        /// Each folder listed once: the finder asks for ~/Library/Preferences and Caches many times per app.
+        public func memoized() -> FileView {
+            let memo = Locked([String: [String]]()), base = self
+            var v = self
+            v.children = { p in
+                if let hit = memo.value[p] { return hit }
+                let kids = base.children(p)
+                memo.mutate { $0[p] = kids }
+                return kids
+            }
+            return v
+        }
 
         /// A file system holding exactly these paths (and their parent folders), matched without regard to case.
         public static func simulated(_ paths: [String]) -> FileView {
@@ -241,16 +281,41 @@ public enum Uninstaller {
             let a = all, k = kids
             return FileView(exists: { a.contains($0.lowercased()) }, isDirectory: { k[$0.lowercased()] != nil || !$0.contains(".") },
                             isSymlink: { _ in false }, children: { Array(k[$0.lowercased()] ?? []).sorted() },
-                            enumerate: { _ in nil }, agentProgram: { _ in nil })
+                            agentProgram: { _ in nil })
         }
     }
 
-    public static func leftovers(for app: InstalledApp) -> [String] { leftovers(for: app, fs: .disk) }
+    public static func leftovers(for app: InstalledApp, apps: [InstalledApp]? = nil) -> [String] {
+        leftovers(for: app, fs: FileView.disk.memoized(), otherIDs: othersIDs(excluding: app.path, apps: apps ?? installedApps()))
+    }
+
+    /// Other apps' IDs, and helpers that other apps also carry (Microsoft's error reporter ships in every
+    /// Office app): they belong to someone else.
+    static func othersIDs(excluding path: String, apps: [InstalledApp]) -> Set<String> {
+        let owned = Locked([[String]](repeating: [], count: apps.count))
+        DispatchQueue.concurrentPerform(iterations: apps.count) { i in
+            guard apps[i].path != path else { return }
+            let ids = ownedIDs(apps[i])
+            owned.mutate { $0[i] = ids }
+        }
+        return Set(owned.value.joined())
+    }
+
+    /// An app's own ID and its helpers' IDs, lower-cased. Kept until the app's Info.plist changes (an update).
+    static let ownedCache = Locked([String: (Date, [String])]())
+    static func ownedIDs(_ app: InstalledApp) -> [String] {
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: app.path + "/Contents/Info.plist")[.modificationDate] as? Date) ?? .distantPast
+        if let hit = ownedCache.value[app.path], hit.0 == stamp { return hit.1 }
+        let ids = ([app.bundleID].compactMap { $0 } + embeddedIDs(app.path, primary: app.bundleID ?? "", fs: .disk)).map { $0.lowercased() }
+        ownedCache.mutate { $0[app.path] = (stamp, ids) }
+        return ids
+    }
 
     /// Visible entries only: dotfiles inside Library folders are never an app's leftovers.
     static func fsKids(_ fs: FileView, _ dir: String) -> [String] { fs.children(dir).filter { !$0.lastComponent.hasPrefix(".") } }
 
-    public static func leftovers(for app: InstalledApp, fs: FileView) -> [String] {
+    public static func leftovers(for app: InstalledApp, fs: FileView, otherIDs: Set<String> = []) -> [String] {
+        let otherIDs = otherIDs.subtracting([app.bundleID?.lowercased() ?? ""])
         var found: [String] = []
         var seen = Set<String>()
         func add(_ p: String) {
@@ -265,7 +330,15 @@ public enum Uninstaller {
 
         let name = app.name
         let id = app.bundleID.flatMap { isReverseDNS($0) ? $0 : nil }
-        let variants = nameVariants(name)
+        var variants = nameVariants(name)
+        // The bundle ID's last part often names the data folder when the display name doesn't
+        // (iTerm → com.googlecode.iterm2 → "iTerm2"; ChatGPT → com.openai.codex → "Codex").
+        if let leaf = id?.split(separator: ".").last.map(String.init), leaf.count >= 4, leaf.lowercased() != name.lowercased(),
+           !commonNames.contains(leaf.lowercased()), !genericLeaves.contains(leaf.lowercased()), leaf.range(of: "^[A-Za-z][A-Za-z0-9]+$", options: .regularExpression) != nil {
+            let cased = [leaf, leaf.prefix(1).uppercased() + leaf.dropFirst()]
+            for c in cased where !variants.cased.contains(c) { variants.cased.append(c) }
+            if !variants.lower.contains(leaf.lowercased()) { variants.lower.append(leaf.lowercased()) }
+        }
 
         // Name-based places. Names shorter than 3 letters or too generic would match other apps' folders.
         if name.count >= 3, !commonNames.contains(name.lowercased()) {
@@ -280,7 +353,7 @@ public enum Uninstaller {
             // keep the auto-updater's downloads in "<name>-updater".
             for n in variants.slug {
                 for p in ["\(lib)/Application Support/\(n)", "\(lib)/Application Support/\(n)-desktop", "\(lib)/Caches/\(n)",
-                          "\(lib)/Caches/\(n)-updater", "\(lib)/Caches/\(n)-desktop-updater", "\(lib)/Logs/\(n)", "\(lib)/Logs/\(n)-desktop"] { add(p) }
+                          "\(lib)/Caches/\(n)-updater", "\(lib)/Caches/\(n)-desktop-updater", "\(lib)/Application Support/Caches/\(n)-updater", "\(lib)/Logs/\(n)", "\(lib)/Logs/\(n)-desktop"] { add(p) }
             }
             // ~/.warp, ~/.zcode: app-owned dot folders. Only for distinctive names, kept unless you choose them.
             if name.count >= 4 {
@@ -319,11 +392,25 @@ public enum Uninstaller {
             }
             // Per-machine preferences: <id>.<host-uuid>.plist.
             for f in fsKids(fs, "\(lib)/Preferences/ByHost") where startsWithID(f.lastComponent, id) { add(f) }
+            let recents = "\(lib)/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
+            // The app's own sub-IDs: <id>.helper, <id>.launcher, <id>.ShipIt. Release channels
+            // (<id>.beta, <id>.canary) and other installed apps' IDs are separate apps and stay.
+            for root in ["\(lib)/Application Support", "\(lib)/Caches", "\(lib)/Logs", "\(lib)/Preferences", "\(lib)/Saved Application State",
+                         "\(lib)/HTTPStorages", "\(lib)/WebKit", "\(lib)/Cookies", "\(lib)/Autosave Information", "\(lib)/Application Scripts",
+                         "\(lib)/Containers"] {
+                for d in fsKids(fs, root) where isSubID(d.lastComponent, of: id, others: otherIDs) || isHelperID(d.lastComponent, of: id, others: otherIDs) { add(d) }
+            }
+            for f in fsKids(fs, recents) where ["sfl2", "sfl3", "sfl4"].contains((f as NSString).pathExtension)
+                && (isSubID(String(f.lastComponent.dropLast(5)), of: id, others: otherIDs) || isHelperID(String(f.lastComponent.dropLast(5)), of: id, others: otherIDs)) { add(f) }
+            // Crash reporters, help-book indexes and vendor updaters keep an entry per app.
+            for p in ["\(lib)/Caches/com.crashlytics.data/\(id)", "\(lib)/Application Support/com.bugsnag.Bugsnag/\(id)",
+                      "\(lib)/Caches/SentryCrash/\(id)", "\(lib)/Application Support/bugsnag-shared-\(id)", "\(lib)/Caches/bugsnag-shared-\(id)",
+                      "\(lib)/Caches/com.apple.helpd/Generated/\(id).help", "\(lib)/Google/GoogleSoftwareUpdate/Actives/\(id)",
+                      "\(lib)/Microsoft/MicrosoftSoftwareUpdate/Actives/\(id)"] { add(p) }
             // App groups (TEAMID.<id>, group.<id>) and extensions (<id>.ShareExtension).
             for root in ["\(lib)/Group Containers", "\(lib)/Containers", "\(lib)/Application Scripts", "\(lib)/Application Support/FileProvider"] {
                 for d in fsKids(fs, root) where hasIDBoundary(d.lastComponent, id) { add(d) }
             }
-            let recents = "\(lib)/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
             for f in fsKids(fs, recents) where ["sfl2", "sfl3", "sfl4"].contains((f as NSString).pathExtension)
                 && f.lastComponent.dropLast(5).lowercased() == id.lowercased() { add(f) }
 
@@ -344,9 +431,9 @@ public enum Uninstaller {
             let parts = id.split(separator: ".").map(String.init)
             if parts.count >= 3, name.count >= 4, !commonNames.contains(name.lowercased()) {
                 let vendor = parts[parts.count - 2].lowercased(), product = parts[parts.count - 1].lowercased()
-                let wanted = Set(variants.lower + [product])
+                let wanted = Set(variants.lower + variants.slug + [product])
                 for root in ["\(lib)/Application Support", "\(lib)/Caches", "\(lib)/Logs"] {
-                    for v in fsKids(fs, root) where v.lastComponent.lowercased() == vendor && fs.isDirectory(v) {
+                    for v in fsKids(fs, root) where fs.isDirectory(v) && [vendor, vendor + "software"].contains(v.lastComponent.lowercased()) {
                         // Exact names only: "Google/Chrome" is Chrome's, "Google/Chrome for Testing" belongs to Playwright.
                         for c in fsKids(fs, v) where channelMatch(c.lastComponent.lowercased(), wanted) { add(c) }
                     }
@@ -354,7 +441,7 @@ public enum Uninstaller {
             }
 
             // Helpers inside the app (extensions, XPC services, login items) keep data under their own IDs.
-            for sub in embeddedIDs(app.path, primary: id, fs: fs) {
+            for sub in embeddedIDs(app.path, primary: id, fs: fs) where !otherIDs.contains(sub.lowercased()) {
                 for p in ["\(lib)/Application Scripts/\(sub)", "\(lib)/Application Support/FileProvider/\(sub)", "\(lib)/Caches/\(sub)",
                           "\(lib)/Containers/\(sub)", "\(lib)/HTTPStorages/\(sub)", "\(lib)/HTTPStorages/\(sub).binarycookies",
                           "\(lib)/Preferences/\(sub).plist", "\(lib)/WebKit/\(sub)"] { add(p) }
@@ -413,6 +500,8 @@ public enum Uninstaller {
                 out += fsKids(fs, base).filter { versioned($0.lastComponent, product) || versioned($0.lastComponent, n) }
             }
         }
+        // Antigravity keeps its agent data inside Gemini CLI's folder; the rest of ~/.gemini is the CLI's.
+        if id == "com.google.antigravity" { out.append("\(home)/.gemini/antigravity") }
         if n.lowercased().hasPrefix("godot") { out.append("\(lib)/Application Support/Godot") }
         if id == "com.anthropic.claudefordesktop" { out += ["\(lib)/Application Support/Claude-3p", "\(lib)/Logs/Claude-3p"] }
         if id == "net.ankiweb.anki" { out.append("\(lib)/Application Support/AnkiProgramFiles") }
@@ -438,6 +527,10 @@ public enum Uninstaller {
         // "Zed Nightly" → "Zed", "Firefox Developer Edition" → "Firefox".
         for suffix in [" Nightly", " Beta", " Alpha", " Dev", " Canary", " Preview", " Insiders", " Stable", " Developer Edition", " Technology Preview", " CE"]
         where name.hasSuffix(suffix) && name.count - suffix.count > 2 { cased.append(String(name.dropLast(suffix.count))) }
+        // "pgAdmin 4" → "pgAdmin".
+        if let r = name.range(of: " [0-9]+$", options: .regularExpression), name.distance(from: name.startIndex, to: r.lowerBound) >= 3 {
+            cased.append(String(name[..<r.lowerBound]))
+        }
         let lower = Array(Set(cased.map { $0.lowercased() }))
         // "OBS Studio" → "obs-studio", "obsstudio"; "Cherry Studio" → "cherry-studio", "cherrystudio".
         let slug = Array(Set(cased.flatMap { c -> [String] in
@@ -479,6 +572,26 @@ public enum Uninstaller {
     static func startsWithID(_ name: String, _ id: String) -> Bool {
         let n = name.lowercased(), i = id.lowercased(); return n == i || n.hasPrefix(i + ".")
     }
+    /// "com.foo.App.helper.plist" for com.foo.App, but not "com.foo.App.beta" or another installed app's ID.
+    static func isSubID(_ leaf: String, of id: String, others: Set<String>) -> Bool {
+        var l = leaf.lowercased()
+        for ext in [".plist", ".savedstate", ".binarycookies"] where l.hasSuffix(ext) { l = String(l.dropLast(ext.count)) }
+        let i = id.lowercased()
+        guard l.hasPrefix(i + "."), l.count > i.count + 1 else { return false }
+        let first = l.dropFirst(i.count + 1).split(separator: ".").first.map(String.init) ?? ""
+        // Release channels and separate products: com.google.Chrome.beta, com.google.chrome.for.testing.
+        if ["beta", "canary", "dev", "nightly", "preview", "insiders", "alpha", "edu", "pro", "lite", "free", "for", "testing"].contains(first) { return false }
+        return !others.contains { o in l == o || l.hasPrefix(o + ".") }
+    }
+    /// Helpers named by appending to the ID: com.evernote.EvernoteHelper, cc.ffitch.shottr-LaunchAtLoginHelper.
+    static func isHelperID(_ leaf: String, of id: String, others: Set<String>) -> Bool {
+        var l = leaf.lowercased()
+        for ext in [".plist", ".savedstate", ".binarycookies"] where l.hasSuffix(ext) { l = String(l.dropLast(ext.count)) }
+        let i = id.lowercased()
+        guard l.hasPrefix(i), !others.contains(l) else { return false }
+        let rest = String(l.dropFirst(i.count))
+        return rest.range(of: "^[-_.]?(launchatlogin|launchatstartup|login|startup|xpc)?(helper|launcher|installer|updater|agent)$", options: .regularExpression) != nil
+    }
     static func hasIDBoundary(_ name: String, _ id: String) -> Bool {
         let n = name.lowercased(), i = id.lowercased()
         return startsWithID(n, i) || n.hasSuffix("." + i) || n.contains("." + i + ".")
@@ -490,32 +603,41 @@ public enum Uninstaller {
         return p == lib || roots.contains { p == lib + "/" + $0 }
     }
 
+    /// Home dot folders of command-line tools that share an app's name (~/.claude, ~/.codex): never an app's leftovers.
+    public static func isNamesake(_ p: String) -> Bool { isNamesakeCLI(p) || (p.parentPath == home && namesakeCLIs.contains(p.lastComponent.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased())) }
     static func isNamesakeCLI(_ p: String) -> Bool {
         let leaf = p.lastComponent.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
         guard namesakeCLIs.contains(leaf) else { return false }
         return [home, home + "/.config", home + "/.local/share", home + "/.cache"].contains(p.parentPath)
     }
 
-    /// Bundle IDs of extensions, XPC services and login items inside the app (at most 128 bundles read).
+    /// Bundle IDs of extensions, XPC services and helper apps inside the app. Only the folders where
+    /// macOS looks for them are read (a full walk of Xcode or Office takes minutes), two levels deep.
     static func embeddedIDs(_ app: String, primary: String, fs: FileView) -> [String] {
         var ids = Set<String>()
-        let contents = app + "/Contents"
-        guard let e = fs.enumerate(contents) else { return [] }
-        var read = 0
-        while let rel = e.nextObject() as? String, read < 128 {
-            guard rel.hasSuffix("/Contents/Info.plist") else {
-                if e.level > 8 { e.skipDescendants() }
-                continue
+        func bundles(in contents: String) -> [String] {
+            var dirs = ["PlugIns", "XPCServices", "Library/LoginItems", "Helpers", "Frameworks", "MacOS", "Library/SystemExtensions",
+                        "Library/QuickLook", "Library/Spotlight", "Library", "Resources", "SharedSupport"].map { contents + "/" + $0 }
+            // Chrome and others keep helpers inside a framework: Frameworks/X.framework/Versions/A/Helpers.
+            for fw in fs.children(contents + "/Frameworks") where fw.hasSuffix(".framework") {
+                for v in [fw, fw + "/Versions/A", fw + "/Versions/Current"] { dirs += [v + "/Helpers", v + "/XPCServices"] }
             }
-            let root = contents + "/" + String(rel.dropLast("/Contents/Info.plist".count))
-            let ext = (root as NSString).pathExtension.lowercased()
-            guard ext == "appex" || ext == "xpc" || (ext == "app" && root.contains("/Contents/Library/LoginItems/")) else { continue }
+            return dirs.flatMap { d in fs.children(d).filter { ["app", "appex", "xpc"].contains(($0 as NSString).pathExtension.lowercased()) } }
+        }
+        var queue = bundles(in: app + "/Contents").map { ($0, 1) }, read = 0
+        while !queue.isEmpty, read < 128 {
+            let (root, depth) = queue.removeFirst()
             read += 1
-            guard let sub = Bundle(path: root)?.bundleIdentifier, isReverseDNS(sub), sub != primary,
-                  !sub.hasPrefix("org.sparkle-project.") else { continue }
-            ids.insert(sub)
+            if let sub = bundleID(root), isReverseDNS(sub), sub != primary,
+               !sub.hasPrefix("org.sparkle-project."), !sub.lowercased().hasPrefix("org.python.") { ids.insert(sub) }
+            if depth < 2 { queue += bundles(in: root + "/Contents").map { ($0, depth + 1) } }
         }
         return ids.sorted()
+    }
+
+    static func bundleID(_ bundle: String) -> String? {
+        (NSDictionary(contentsOfFile: bundle + "/Contents/Info.plist")?["CFBundleIdentifier"] as? String)
+            ?? (NSDictionary(contentsOfFile: bundle + "/Info.plist")?["CFBundleIdentifier"] as? String)
     }
 
     static func agentProgram(_ plist: String) -> String? {
@@ -576,3 +698,4 @@ public enum Uninstaller {
         await recycleOnMain(URL(fileURLWithPath: path))
     }
 }
+
