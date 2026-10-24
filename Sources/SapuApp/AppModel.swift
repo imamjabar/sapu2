@@ -1,0 +1,229 @@
+import AppKit
+import SapuCore
+import SwiftUI
+
+enum Pane: String, Hashable, CaseIterable, Identifiable {
+    case overview = "Overview"
+    case cleanable = "Ready to clean"
+    case caches = "Caches"
+    case artifacts = "Build folders"
+    case logs = "Logs"
+    case apps = "Apps"
+    case files = "Old & large files"
+    case projects = "Projects"
+    case map = "Disk map"
+    case security = "Security & versions"
+    case receipts = "Receipts"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .overview: "gauge.with.dots.needle.33percent"
+        case .cleanable: "sparkles"
+        case .caches: "shippingbox"
+        case .artifacts: "hammer"
+        case .logs: "doc.text"
+        case .apps: "app.dashed"
+        case .files: "doc.on.doc"
+        case .projects: "folder"
+        case .map: "chart.bar.doc.horizontal"
+        case .security: "shield.lefthalf.filled"
+        case .receipts: "list.bullet.clipboard"
+        }
+    }
+
+    func includes(_ f: Finding) -> Bool {
+        switch self {
+        case .cleanable: f.isCleanable && f.safety <= .check
+        case .caches: [.devCaches, .appCaches, .xcode, .ml, .containers].contains(f.category) && f.action != .none
+        case .artifacts: f.category == .projects
+        case .logs: f.category == .logs
+        case .apps: f.category == .apps
+        case .files: f.category == .downloads
+        case .map: f.layer == .full && (f.category == .home || f.category == .appData) || f.category == .trash
+        default: false
+        }
+    }
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published var snapshot: Snapshot
+    @Published var section: Pane = .overview
+    @Published var focused: Finding.ID?
+    @Published var checked = Set<Finding.ID>()
+    @Published var scanning: ScanLayer?
+    @Published var queue: [ScanLayer] = []
+    @Published var progress: ScanProgress?
+    @Published var versions: [VersionFinding] = []
+    @Published var versionsLive = false
+    @Published var checkingVersions = false
+    @Published var receipts: [CleanReceipt] = Store.receipts()
+    @Published var reviewing = false
+    @Published var cleaning = false
+    @Published var cleanStatus = ""
+    @Published var lastReceipt: CleanReceipt?
+    @Published var search = ""
+    @Published var audits: [String: String] = [:]
+    @Published var allowActiveProjects = UserDefaults.standard.bool(forKey: "allowActiveProjects") {
+        didSet { UserDefaults.standard.set(allowActiveProjects, forKey: "allowActiveProjects") }
+    }
+    @Published var activeDays = UserDefaults.standard.object(forKey: "activeDays") as? Int ?? 14 {
+        didSet { UserDefaults.standard.set(activeDays, forKey: "activeDays") }
+    }
+
+    let engine = ScanEngine()
+    let hasFullDiskAccess = SystemProbe.hasFullDiskAccess
+
+    init() {
+        snapshot = Store.load() ?? Snapshot()
+        snapshot.volume = SystemProbe.volume()
+        // `open Sapu.app --args -SapuPane Projects` opens a pane directly (used for screenshots).
+        if let p = UserDefaults.standard.string(forKey: "SapuPane"), let pane = Pane(rawValue: p) { section = pane }
+    }
+
+    /// First launch runs the two light layers; later launches show cached results instantly.
+    func onLaunch() {
+        if snapshot.layerDates.isEmpty { scan([.quick, .projects]) }
+        Task { await refreshVersions(network: false) }
+    }
+
+    // MARK: Scanning
+
+    func scan(_ layers: [ScanLayer]) {
+        guard scanning == nil else { queue.append(contentsOf: layers.filter { !queue.contains($0) }); return }
+        queue = layers
+        Task { await runQueue() }
+    }
+
+    private func runQueue() async {
+        while !queue.isEmpty {
+            let layer = queue.removeFirst()
+            scanning = layer
+            progress = nil
+            let start = Date()
+            let previous = snapshot
+            let sink: @Sendable (ScanProgress) -> Void = { p in Task { @MainActor [weak self] in self?.progress = p } }
+            switch layer {
+            case .quick:
+                let found = await engine.quick(previous: previous, progress: sink)
+                if !engine.isCancelled { snapshot.replace(layer: .quick, with: found) }
+            case .projects:
+                let days = activeDays
+                let r = await engine.projects(previous: previous, activeDays: days, progress: sink)
+                if !engine.isCancelled { snapshot.replace(layer: .projects, with: r.findings); snapshot.projects = r.projects }
+            case .full:
+                let found = await engine.full(previous: previous, progress: sink)
+                if !engine.isCancelled { snapshot.replace(layer: .full, with: found) }
+            }
+            if engine.isCancelled { queue = []; break }
+            snapshot.layerDates[layer.rawValue] = Date()
+            snapshot.layerDurations[layer.rawValue] = Date().timeIntervalSince(start)
+            finishSnapshot()
+        }
+        scanning = nil
+        progress = nil
+    }
+
+    func cancelScan() { queue = []; engine.cancel() }
+
+    private func finishSnapshot() {
+        snapshot.volume = SystemProbe.volume()
+        snapshot.insights = Insights.build(snapshot, versions: versions)
+        checked = checked.filter { id in snapshot.findings.contains { $0.id == id && isSelectable($0) } }
+        let s = snapshot
+        Task.detached(priority: .utility) { Store.save(s) }
+    }
+
+    // MARK: Versions
+
+    func refreshVersions(network: Bool) async {
+        checkingVersions = true
+        let projects = snapshot.projects
+        let (found, live) = await Task.detached(priority: .utility) {
+            await VersionAudit.audit(projects: projects, allowNetwork: network)
+        }.value
+        versions = found
+        versionsLive = live
+        checkingVersions = false
+        snapshot.insights = Insights.build(snapshot, versions: versions)
+    }
+
+    func audit(project: Project) {
+        audits[project.path] = "Running…"
+        let path = project.path
+        Task.detached(priority: .utility) {
+            let out = DependencyAudit.run(projectPath: path)
+            await MainActor.run { self.audits[path] = out }
+        }
+    }
+
+    // MARK: Selection
+
+    func findings(for section: Pane) -> [Finding] {
+        let q = search.lowercased()
+        return snapshot.findings
+            .filter { section.includes($0) }
+            .filter { q.isEmpty || $0.title.lowercased().contains(q) || $0.path.lowercased().contains(q) || ($0.owner ?? "").lowercased().contains(q) }
+            .sorted { $0.bytes > $1.bytes }
+    }
+
+    func isSelectable(_ f: Finding) -> Bool {
+        if f.safety == .protected || f.action == .none { return false }
+        if let lock = f.lockedReason { return allowActiveProjects && lock.hasPrefix("Active project") }
+        return true
+    }
+
+    func toggle(_ f: Finding) {
+        guard isSelectable(f) else { return }
+        if checked.contains(f.id) { checked.remove(f.id) } else { checked.insert(f.id) }
+    }
+
+    func selectSafe(in section: Pane) {
+        for f in findings(for: section) where f.safety == .safe && isSelectable(f) { checked.insert(f.id) }
+    }
+
+    var checkedFindings: [Finding] { snapshot.findings.filter { checked.contains($0.id) }.sorted { $0.bytes > $1.bytes } }
+    var checkedBytes: Int64 { checkedFindings.reduce(0) { $0 + $1.bytes } }
+
+    var focusedFinding: Finding? { focused.flatMap { id in snapshot.findings.first { $0.id == id } } }
+
+    // MARK: Cleaning
+
+    func clean() {
+        let items = checkedFindings
+        let allow = allowActiveProjects
+        cleaning = true
+        cleanStatus = "Starting…"
+        Task.detached(priority: .userInitiated) {
+            let receipt = Cleaner.clean(items, allowActiveProjects: allow) { i, title in
+                Task { @MainActor in self.cleanStatus = "\(i + 1)/\(items.count) · \(title)" }
+            }
+            await MainActor.run {
+                self.lastReceipt = receipt
+                self.cleaning = false
+                self.receipts = Store.receipts()
+                let done = Set(receipt.items.filter(\.ok).map(\.path))
+                self.snapshot.findings.removeAll { done.contains($0.path) && $0.action != .truncateLogs && !self.isCommand($0) }
+                for i in self.snapshot.findings.indices where done.contains(self.snapshot.findings[i].path) {
+                    self.snapshot.findings[i].bytes = 0
+                }
+                self.checked.subtract(done)
+                self.finishSnapshot()
+            }
+        }
+    }
+
+    private func isCommand(_ f: Finding) -> Bool { if case .command = f.action { return true }; return false }
+
+    // MARK: Helpers
+
+    func reveal(_ path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    func openFullDiskAccessSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+    }
+}
