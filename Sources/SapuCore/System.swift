@@ -44,22 +44,48 @@ public enum SystemProbe {
 
     /// When an app was last used. Spotlight's "last opened" is often missing (Microsoft Office,
     /// apps launched from the Dock or by Login Items), so the newest of these counts:
-    /// Spotlight, the app's own preferences (sandboxed or not), and its saved window state.
+    /// Spotlight, the app's own preferences (sandboxed or not), its saved window state, and the files
+    /// it writes in its own Application Support folder (Chrome, Electron apps and many others keep
+    /// their prefs there and never touch the plist or saved state).
     public static func lastUsed(app path: String) -> Date? {
         var dates: [Date] = []
         if let item = MDItemCreate(nil, path as CFString), let d = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date {
             dates.append(d)
         }
-        if let id = Bundle(path: path)?.bundleIdentifier {
-            let lib = NSHomeDirectory() + "/Library"
-            for p in ["\(lib)/Preferences/\(id).plist",
-                      "\(lib)/Containers/\(id)/Data/Library/Preferences/\(id).plist",
-                      "\(lib)/Saved Application State/\(id).savedState",
-                      "\(lib)/Containers/\(id)/Data/Library/Saved Application State/\(id).savedState"] {
-                if let m = DiskSizer.mtime(p) { dates.append(m) }
-            }
+        guard let bundle = Bundle(path: path), let id = bundle.bundleIdentifier else { return dates.max() }
+        let lib = NSHomeDirectory() + "/Library"
+        for p in ["\(lib)/Preferences/\(id).plist",
+                  "\(lib)/Containers/\(id)/Data/Library/Preferences/\(id).plist",
+                  "\(lib)/Saved Application State/\(id).savedState",
+                  "\(lib)/Containers/\(id)/Data/Library/Saved Application State/\(id).savedState"] {
+            if let m = DiskSizer.mtime(p) { dates.append(m) }
+        }
+        for dir in supportDirs(id: id, name: (path as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: ""),
+                               bundleName: bundle.infoDictionary?["CFBundleName"] as? String, lib: lib) {
+            if let m = newestShallow(dir) { dates.append(m) }
         }
         return dates.max()
+    }
+
+    /// The app's own data folders: by bundle ID, by name, and vendor/product ("Google Chrome" → "Google/Chrome").
+    static func supportDirs(id: String, name: String, bundleName: String?, lib: String) -> [String] {
+        let support = lib + "/Application Support"
+        var names = [id, name]
+        if let bundleName { names.append(bundleName) }
+        let words = name.split(separator: " ", maxSplits: 1).map(String.init)
+        if words.count == 2 { names.append(words[0] + "/" + words[1]) }
+        var dirs = Set(names.map { support + "/" + $0 })
+        dirs.insert("\(lib)/Containers/\(id)/Data/Library/Application Support")
+        return dirs.filter(DiskSizer.isDirectory).sorted()
+    }
+
+    /// Newest mtime of a folder and its direct children. One directory read, no recursion.
+    static func newestShallow(_ dir: String) -> Date? {
+        var newest = DiskSizer.mtime(dir)
+        for child in DiskSizer.children(dir).prefix(300) {
+            if let m = DiskSizer.mtime(child), m > (newest ?? .distantPast) { newest = m }
+        }
+        return newest
     }
 
     /// Full Disk Access is needed to size Mail, Safari, Messages and some containers.
