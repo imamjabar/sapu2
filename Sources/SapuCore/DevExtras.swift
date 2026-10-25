@@ -25,7 +25,7 @@ public enum DevExtras {
     /// Every candidate under `home`. `projects` are project roots from the last scan (for `.claude/worktrees`).
     /// `system` prefixes the few read-only locations outside the home folder (tests point it at a fake root).
     public static func candidates(home: String = NSHomeDirectory(), projects: [String] = [], now: Date = Date(),
-                                  system: String = "", simRuntimes: () -> Data? = DevExtras.simctlRuntimes,
+                                  system: String = "", userCache: String = DevExtras.userCacheDir(), simRuntimes: () -> Data? = DevExtras.simctlRuntimes,
                                   gitClean: (String) -> Bool? = DevExtras.gitClean) -> [Candidate] {
         claudeJobs(home: home, now: now)
             + agentWorktrees(home: home, projects: projects, now: now, gitClean: gitClean)
@@ -35,7 +35,14 @@ public enum DevExtras {
             + pnpmStores(home: home)
             + simulatorRuntimes(json: simRuntimes(), system: system)
             + instrumentsTraces(home: home, projects: projects, now: now)
-            + manageSeparately(home: home, system: system)
+            + manageSeparately(home: home, system: system, userCache: userCache)
+    }
+
+    /// This account's macOS cache folder (/var/folders/…/C), outside the home folder.
+    public static func userCacheDir() -> String {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard confstr(_CS_DARWIN_USER_CACHE_DIR, &buf, buf.count) > 0 else { return "" }
+        return (String(cString: buf) as NSString).standardizingPath
     }
 
     // MARK: Claude Code jobs
@@ -309,7 +316,7 @@ public enum DevExtras {
     // MARK: Manage separately
 
     /// Big data that only its own app can remove correctly (a VM disk, a model library). Explained, never cleaned.
-    static func manageSeparately(home: String, system: String) -> [Candidate] {
+    static func manageSeparately(home: String, system: String, userCache: String = "") -> [Candidate] {
         let items: [(String, String, Category, String, String, String)] = [
             ("/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data", "OrbStack disk", .containers, "OrbStack",
              "One disk holding every OrbStack container, image, volume and Linux machine.",
@@ -341,6 +348,16 @@ public enum DevExtras {
                                  reason: "Videos macOS downloaded for aerial wallpapers and screen savers. They sit outside your home folder and need admin rights to remove.",
                                  usedFor: "macOS. Manage it in System Settings.", owner: "macOS",
                                  rebuild: "Choose a still wallpaper and screen saver in System Settings so macOS stops downloading more; macOS downloads them again if you switch back.",
+                                 action: .none))
+        }
+        // Clang's precompiled module cache (Xcode, swiftc, Homebrew builds) sits in this account's macOS cache
+        // folder, outside the home folder, so it is shown, never cleaned.
+        let clang = userCache + "/clang/ModuleCache"
+        if !userCache.isEmpty, DiskSizer.isDirectory(clang), !DiskSizer.isSymlink(clang) {
+            out.append(Candidate(path: clang, title: "Clang module cache", category: .devCaches, safety: .check,
+                                 reason: "Precompiled system and framework modules clang and swiftc build once and reuse. Every SDK and compiler version adds its own set, and old ones stay.",
+                                 usedFor: "Faster Swift, Objective-C and C builds.", owner: "clang",
+                                 rebuild: "Rebuilt on your next build (the first one is slower). It's outside your home folder, so Sapu only shows it: quit Xcode and build tools, then delete the ModuleCache folder in Finder (Go › Go to Folder…).",
                                  action: .none))
         }
         return out

@@ -81,6 +81,7 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - **Old pnpm store layouts:** `store/v3` left behind after pnpm 10 moved to `store/v10`. Never preselected (a project may still pin an older pnpm); the current store is pruned with `pnpm store prune`.
 - **Instruments recordings:** `.trace` bundles inside your projects. Recordings from the last week are locked.
 - **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models, and macOS aerial wallpaper videos are listed so the space is explained, but only their own app removes them.
+- **Clang module cache:** precompiled modules from Xcode and swiftc in your account's macOS cache folder (`/var/folders/…/C/clang/ModuleCache`). It's outside your home folder, so Sapu shows its size and how to remove it but never cleans it.
 
 Home has a short **What's safe to delete?** guide: caches rebuild themselves, build folders come back with one command, logs are emptied, and your files are never ticked for you.
 
@@ -113,7 +114,8 @@ Secrets are shown masked (first 8 characters and the length), each with the exac
 
 - **Browsers** (Chrome, Arc, Brave, Edge, Vivaldi, Opera): only named cache folders per profile (page cache, service-worker cache, GPU and shader caches, downloaded components). Logins, history, bookmarks and extensions are never touched. Locked while the browser runs.
 - **Old tool versions:** Claude Code versions other than the one in use (and any a running process uses), Google Updater's installed packages, the PyInstaller cache. The previous Chrome version inside the app is shown with a hint to restart Chrome; Sapu does not edit files inside apps.
-- **App caches and logs** inside `~/Library/Application Support/<app>`.
+- **App caches and logs** inside `~/Library/Application Support/<app>`, including Electron's compiled code cache (`CachedData`).
+- **npm prebuilt binaries** (`~/.npm/_prebuilds`): native add-ons downloaded for each version you installed.
 - **Known locations of ~400 apps and tools** (AppCatalog), cross-checked against the locations a reference open-source cleaner cleans. Only paths were used; that project is GPL-3.0 and none of its code or text is included. macOS's own caches are marked "Check first" because rebuilding them costs time and battery.
 - **Build output:** PyInstaller `build`/`dist` (next to a `.spec`), dbt `target`/`dbt_packages`, and renamed dependency folders such as `node_modules-old`, listed as one item. Folders inside a dependency tree are never listed on their own.
 - Projects older than 90 days that are kept only because of uncommitted changes are labelled **Uncommitted work**.

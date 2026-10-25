@@ -263,13 +263,14 @@ func selftest() -> Int32 {
     put("Code/app/package.json"); put("Code/app/perf/Launch_old.trace/x"); put("Code/app/perf/Launch_new.trace/x")
     try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -30 * 86_400)], ofItemAtPath: dh + "/Code/app/perf/Launch_old.trace")
     put("sys/Library/Application Support/com.apple.idleassetsd/Customer/4KSDR/a.mov")
+    put("ucache/clang/ModuleCache/ABC/Foundation.pcm")
     for r in ["iOS-17-0", "iOS-18-2", "watchOS-10-0"] { put("sys/Library/Developer/CoreSimulator/Images/\(r).dmg") }
     let simJSON = #"""
     {"A":{"identifier":"A","version":"17.0","platformIdentifier":"com.apple.platform.iphonesimulator","path":"/Library/Developer/CoreSimulator/Images/iOS-17-0.dmg","deletable":true},
      "B":{"identifier":"B","version":"18.2","platformIdentifier":"com.apple.platform.iphonesimulator","path":"/Library/Developer/CoreSimulator/Images/iOS-18-2.dmg","deletable":true},
      "C":{"identifier":"C","version":"10.0","platformIdentifier":"com.apple.platform.watchsimulator","path":"/Library/Developer/CoreSimulator/Images/watchOS-10-0.dmg","deletable":true}}
     """#
-    let dc = DevExtras.candidates(home: dh, projects: [dh + "/Code/app"], now: Date(), system: dh + "/sys",
+    let dc = DevExtras.candidates(home: dh, projects: [dh + "/Code/app"], now: Date(), system: dh + "/sys", userCache: dh + "/ucache",
                                   simRuntimes: { Data(simJSON.utf8) }, gitClean: { $0.contains("ab12") })
     let dp = Set(dc.map { String($0.path.dropFirst(dh.count + 1)) })
     check(dp.contains(".claude/jobs/done1/tmp") && !dp.contains(".claude/jobs/run1/tmp") && !dp.contains(".claude/jobs/pin1/tmp"),
@@ -291,7 +292,7 @@ func selftest() -> Int32 {
     let sims = dc.filter { $0.title.hasPrefix("Simulator runtime") }
     check(sims.count == 1 && sims[0].title.contains("iOS 17.0") && sims[0].action == CleanAction.command("xcrun simctl runtime delete A"),
           "dev: only older simulator runtimes listed, removed with simctl; newest per platform stays")
-    let noXcode = DevExtras.candidates(home: dh, now: Date(), system: dh + "/sys", simRuntimes: { nil }, gitClean: { _ in true })
+    let noXcode = DevExtras.candidates(home: dh, now: Date(), system: dh + "/sys", userCache: "", simRuntimes: { nil }, gitClean: { _ in true })
     check(noXcode.contains { $0.path.hasSuffix("CoreSimulator/Images") && $0.action == CleanAction.none },
           "dev: without Xcode, simulator images are only shown")
     let traces = dc.filter { $0.owner == "Instruments" }
@@ -300,6 +301,9 @@ func selftest() -> Int32 {
           "dev: Instruments recordings in projects listed; ones from the last week locked")
     check(dc.contains { $0.title == "Aerial wallpaper videos" && $0.action == CleanAction.none },
           "dev: aerial wallpaper videos explained, never cleaned (outside home)")
+    check(dc.contains { $0.path.hasSuffix("ucache/clang/ModuleCache") && $0.action == CleanAction.none } && !noXcode.contains { $0.title == "Clang module cache" },
+          "dev: clang module cache shown with how to remove it, never cleaned (outside home)")
+    check(RuleBook.all.contains { $0.paths == ["~/.npm/_prebuilds"] && $0.safety == .safe }, "dev: npm prebuilt binaries are a safe cache")
 
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
