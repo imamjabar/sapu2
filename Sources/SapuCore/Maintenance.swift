@@ -25,7 +25,8 @@ public enum Maintenance {
     static let home = NSHomeDirectory()
 
     public static func check() -> [MaintenanceTask] {
-        [brokenLaunchAgents(), brokenPreferences(), quickLook(), dsStore(), launchServices(), dns(), snapshots(), brewAutoremove()].compactMap { $0 }
+        [brokenLaunchAgents(), brokenPreferences(), quickLook(), dsStore(), launchServices(), dns(), snapshots(), brewAutoremove(),
+         downloadHistory(), brewOutdated()].compactMap { $0 }
     }
 
     /// Runs one task's fix. Removals go to the Trash and are written to a receipt.
@@ -57,6 +58,8 @@ public enum Maintenance {
         case "brew":
             let r = Shell.run([brew ?? "brew", "autoremove"], timeout: 600)
             return (r.status == 0, r.status == 0 ? "Removed unused Homebrew dependencies." : "brew autoremove failed: \(r.err.suffix(200))")
+        case "quarantine":
+            return clearDownloadHistory()
         default:
             return (false, "Nothing to run.")
         }
@@ -128,6 +131,46 @@ public enum Maintenance {
         return MaintenanceTask(id: "snapshots", title: "Time Machine local snapshots", status: n > 3 ? .attention : .info,
                                detail: "\(n) local snapshot(s) hold deleted files until macOS needs the space. Finder counts them as purgeable. Thinning them frees that space now.",
                                fix: .terminal("tmutil thinlocalsnapshots / 999999999999 4"))
+    }
+
+    static let quarantineDB = home + "/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
+
+    /// macOS records every file you download, with the web address it came from. It is never trimmed.
+    static func downloadHistory() -> MaintenanceTask? {
+        guard FileManager.default.fileExists(atPath: quarantineDB) else { return nil }
+        let n = Int(Shell.run(["sqlite3", "-readonly", quarantineDB, "select count(*) from LSQuarantineEvent"], timeout: 10).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return MaintenanceTask(id: "quarantine", title: "Download history", status: .info,
+                               detail: n == 0 ? "macOS's list of downloaded files is empty."
+                                              : "macOS keeps a list of all \(n) files you downloaded and the web address of each. Clearing it is for privacy; the \"downloaded from the internet\" check on your files stays. A copy goes to the Trash first.",
+                               paths: [quarantineDB], fix: n == 0 ? .none : .run, fixLabel: "Clear history")
+    }
+
+    /// Copies the database to the Trash (listed in Receipts), then empties it.
+    static func clearDownloadHistory() -> (ok: Bool, message: String) {
+        let stamp = Date().ISO8601Format(.iso8601.year().month().day())
+        let copy = NSTemporaryDirectory() + "QuarantineEventsV2 backup \(stamp)"
+        try? FileManager.default.removeItem(atPath: copy)
+        guard (try? FileManager.default.copyItem(atPath: quarantineDB, toPath: copy)) != nil else { return (false, "Couldn't make a backup copy; nothing was cleared.") }
+        let (moved, msg, to) = Cleaner.trash(copy)
+        guard moved else { return (false, "Couldn't put the backup in the Trash (\(msg)); nothing was cleared.") }
+        let r = Shell.run(["sqlite3", quarantineDB, "delete from LSQuarantineEvent; vacuum;"], timeout: 30)
+        let free = SystemProbe.volume().free
+        Cleaner.save(CleanReceipt(date: Date(), items: [.init(path: quarantineDB, title: "Download history (backup copy)", bytes: 0, action: "Clear history",
+                                                              ok: r.status == 0, message: r.status == 0 ? "Cleared. The backup copy is in the Trash." : "sqlite3 failed: \(r.err.suffix(200))",
+                                                              trashedTo: to)], freeBefore: free, freeAfter: free))
+        return r.status == 0 ? (true, "Cleared. A backup copy is in the Trash.") : (false, "Couldn't clear it: \(r.err.suffix(200))")
+    }
+
+    /// Homebrew packages with a newer version (read from Homebrew's own records, nothing downloaded or changed).
+    static func brewOutdated() -> MaintenanceTask? {
+        guard let brew else { return nil }
+        let r = Shell.run(["/usr/bin/env", "HOMEBREW_NO_AUTO_UPDATE=1", brew, "outdated", "--quiet"], timeout: 60)
+        let names = r.out.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        return MaintenanceTask(id: "brewoutdated", title: "Homebrew updates", status: names.isEmpty ? .ok : .info,
+                               detail: names.isEmpty ? "Every Homebrew package is up to date (as of Homebrew's last update check)."
+                                                     : "\(names.count) package(s) have a newer version: \(names.prefix(10).joined(separator: ", "))\(names.count > 10 ? "…" : ""). Updating can change versions your projects use, so it's yours to run.",
+                               fix: names.isEmpty ? .none : .terminal("brew upgrade"))
     }
 
     static var brew: String? { ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first(where: FileManager.default.isExecutableFile) }

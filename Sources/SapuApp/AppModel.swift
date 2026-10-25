@@ -398,6 +398,70 @@ final class AppModel: ObservableObject {
 
     // MARK: Helpers
 
+    // MARK: Forgotten developer processes
+
+    @Published var devProcesses: [DevProcess] = []
+    @Published var devProcessResults: [Int32: String] = [:]
+
+    func loadDevProcesses() {
+        Task.detached(priority: .utility) {
+            let p = DevProcesses.find()
+            await MainActor.run { self.devProcesses = p }
+        }
+    }
+
+    func quit(_ p: DevProcess) {
+        Task.detached(priority: .userInitiated) {
+            let r = DevProcesses.quit(p)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let fresh = DevProcesses.find()
+            await MainActor.run { self.devProcessResults[p.pid] = r.message; self.devProcesses = fresh }
+        }
+    }
+
+    // MARK: Startup items
+
+    @Published var startup: [StartupItem] = []
+    @Published var startupBusy: String?
+    @Published var startupResults: [String: String] = [:]
+
+    func loadStartup() {
+        Task.detached(priority: .userInitiated) {
+            let items = Startup.list()
+            await MainActor.run { self.startup = items }
+        }
+    }
+
+    enum StartupAction { case turnOff, turnOn, remove }
+
+    func startup(_ item: StartupItem, _ action: StartupAction) {
+        startupBusy = item.id
+        Task.detached(priority: .userInitiated) {
+            let r = switch action {
+            case .turnOff: Startup.turnOff(item)
+            case .turnOn: Startup.turnOn(item)
+            case .remove: Startup.removeLeftover(item)
+            }
+            let items = Startup.list()
+            await MainActor.run {
+                self.startupResults[item.id] = r.message
+                self.startup = items
+                self.startupBusy = nil
+                self.receipts = Store.receipts()
+            }
+        }
+    }
+
+    /// Messages from Put back that didn't work, keyed by "<receipt id>#<item>".
+    @Published var putBackResults: [String: String] = [:]
+
+    func putBack(_ receipt: CleanReceipt, item: Int) {
+        let r = Restorer.putBack(receipt, item: item)
+        putBackResults["\(receipt.id)#\(item)"] = r.ok ? nil : r.message
+        receipts = Store.receipts()
+        if r.ok { explorer.refresh() }
+    }
+
     func reveal(_ path: String) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }

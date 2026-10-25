@@ -80,6 +80,8 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - **Older simulator runtimes:** with Xcode installed, every iOS/watchOS/tvOS/visionOS simulator runtime except the newest per platform, removed with `xcrun simctl runtime delete`. Without Xcode, leftover images are only shown.
 - **Old pnpm store layouts:** `store/v3` left behind after pnpm 10 moved to `store/v10`. Never preselected (a project may still pin an older pnpm); the current store is pruned with `pnpm store prune`.
 - **Instruments recordings:** `.trace` bundles inside your projects. Recordings from the last week are locked.
+- **Claude Code chats of deleted projects:** chat folders whose project folder no longer exists (read from the chats themselves). Never preselected: they're your history.
+- **Ollama models:** each model sized by its layers, removed with `ollama rm` so layers shared with other models stay. Never preselected.
 - **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models, and macOS aerial wallpaper videos are listed so the space is explained, but only their own app removes them.
 - **Clang module cache:** precompiled modules from Xcode and swiftc in your account's macOS cache folder (`/var/folders/…/C/clang/ModuleCache`). It's outside your home folder, so Sapu shows its size and how to remove it but never cleans it.
 
@@ -100,16 +102,22 @@ Secrets are shown masked (first 8 characters and the length), each with the exac
 ### Disk map
 - **Browse your home folder, biggest first:** open any folder and see what fills it. Sizes appear as each folder is measured, three at a time in the background so the Mac stays responsive, and going back is instant.
 - **Linked to the cleaner:** an item Sapu already knows shows its badge (Safe, Check first, Your files) and opens its details; a folder shows how much inside it Sapu can clean.
-- **Private by design:** links are never followed. Keychains, `~/.ssh`, `~/.gnupg`, mail, messages, password managers, photo libraries and cloud folders are measured but never listed. Nothing is deleted from the map.
+- **Largest files:** single files of 200 MB or more anywhere in your home folder, biggest first.
+- **Move to Trash:** right-click any item. Sapu checks first and refuses private folders, projects you're working on, and folders holding sign-ins or keys; otherwise it asks, moves the item to the Trash and writes a receipt.
+- **Private by design:** links are never followed. Keychains, `.ssh`, `.gnupg`, mail, messages, password managers, photo libraries and cloud folders are measured but never listed.
 
 ### Health and Maintenance
 
 - **Health:**
   - memory pressure, swap, processor load, disk, battery wear and temperature;
   - the apps using the most memory and processor, with helpers counted under their app;
-  - plain advice and a 0–100 score.
+  - plain advice and a 0–100 score;
+  - **forgotten developer processes:** dev servers, runtimes and language servers still running 12+ hours after their terminal or editor closed. Quit asks one to stop (never forced, never automatic); anything launchd runs on purpose, such as `brew services`, is left alone.
+- **Startup items:** everything in `~/Library/LaunchAgents`, on or off. **Turn off** stops it and keeps it off after restarts (`launchctl bootout` + `disable`, or `brew services stop` for Homebrew services) without deleting anything; **Turn on** brings it back. Only leftovers whose program is gone can be removed, to the Trash with a receipt. System items are shown only, and apps' own login items open in System Settings.
 - **Maintenance:**
   - background items whose program is gone;
+  - download history (macOS's list of every file you downloaded, with its web address), cleared after a copy goes to the Trash;
+  - Homebrew packages with updates, with `brew upgrade` for you to run;
   - damaged settings files;
   - Quick Look refresh, the "Open With" rebuild and `.DS_Store` on shared drives;
   - unused Homebrew dependencies.
@@ -141,7 +149,7 @@ Sapu checks installed runtimes (PHP from Homebrew and MAMP, Node via nvm, Python
 - Caches are cleaned with the tool's own command (`npm cache clean --force`, `brew cleanup`, `conda clean --all`, `go clean -cache`…).
 - Logs are **emptied in place**, so running services keep writing.
 - Virtualenvs without a lockfile get a `requirements-freeze-<date>.txt` saved before they go.
-- Each cleanup writes a receipt (Markdown + JSON) listing where every item went.
+- Each cleanup writes a receipt (Markdown + JSON) listing where every item went, and **Put back** in Receipts returns any item from the Trash to where it was.
 - A final safety guard refuses home folders, `~/Library` roots, Keychains, iCloud, Mail, Messages, Photos, `~/.ssh`, `~/.aws`, `.env*`, keys and certificates, symlinks, and the files of running apps, whatever the UI allowed.
 
 Sapu never empties your Trash, never uses `sudo`, and never runs `docker volume prune`.
@@ -155,6 +163,8 @@ The app bundle includes `sapu-cli`, which uses the same engine and shares the sa
 /Applications/Sapu.app/Contents/Resources/sapu-cli report
 /Applications/Sapu.app/Contents/Resources/sapu-cli versions
 /Applications/Sapu.app/Contents/Resources/sapu-cli du ~/Library       # a folder's children, biggest first
+/Applications/Sapu.app/Contents/Resources/sapu-cli startup          # startup items and their state
+/Applications/Sapu.app/Contents/Resources/sapu-cli devprocs         # forgotten developer processes
 /Applications/Sapu.app/Contents/Resources/sapu-cli selftest
 ```
 

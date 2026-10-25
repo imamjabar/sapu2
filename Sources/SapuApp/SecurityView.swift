@@ -195,16 +195,22 @@ struct ReceiptsView: View {
             } else {
                 List(model.receipts) { r in
                     DisclosureGroup {
-                        ForEach(r.items, id: \.self) { i in
+                        ForEach(Array(r.items.enumerated()), id: \.offset) { n, i in
                             HStack(alignment: .top) {
-                                Image(systemName: i.ok ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(i.ok ? .green : .orange)
+                                Image(systemName: i.restored == true ? "arrow.uturn.backward.circle.fill" : i.ok ? "checkmark.circle.fill" : "exclamationmark.circle")
+                                    .foregroundStyle(i.restored == true ? .blue : i.ok ? .green : .orange)
                                 VStack(alignment: .leading) {
                                     Text(i.title)
-                                    Text(i.message).font(.caption).foregroundStyle(.secondary)
-                                    if let t = i.trashedTo { Text("In Trash: \(t.tildePath)").font(.caption.monospaced()).foregroundStyle(.secondary) }
+                                    Text(i.restored == true ? "Put back to \(i.path.tildePath)." : i.message).font(.caption).foregroundStyle(.secondary)
+                                    if let t = i.trashedTo, i.restored != true { Text("In Trash: \(t.tildePath)").font(.caption.monospaced()).foregroundStyle(.secondary) }
+                                    if let m = model.putBackResults["\(r.id)#\(n)"] { Text(m).font(.caption).foregroundStyle(.orange) }
                                 }
                                 Spacer()
                                 Text(Format.bytes(i.bytes)).monospacedDigit()
+                                if i.ok, i.trashedTo != nil, i.restored != true {
+                                    Button("Put back") { model.putBack(r, item: n) }
+                                        .help("Move it from the Trash back to \(i.path.tildePath)")
+                                }
                             }
                         }
                     } label: {

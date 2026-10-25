@@ -11,6 +11,11 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var entries: [DiskExplorer.Entry] = []
     @Published private(set) var sizes: [String: SizeResult] = [:]
     @Published var selection: String?
+    enum Mode: String, CaseIterable { case folders = "Folders", largest = "Largest files" }
+    @Published var mode = Mode.folders
+    @Published private(set) var largest: [DiskExplorer.LargeFile] = []
+    @Published private(set) var searchingLargest = false
+    private var largestLoaded = false
     private var started = false
     /// Three folders at a time, in the background, so the Mac stays responsive while ~/Library is measured.
     private let queue: OperationQueue = {
@@ -61,6 +66,27 @@ final class ExplorerModel: ObservableObject {
 
     func up() { if path != root { open(path.parentPath) } }
 
+    /// Single big files anywhere in your home folder, found once per session (Refresh looks again).
+    func findLargest(force: Bool = false) {
+        guard !searchingLargest, force || !largestLoaded else { return }
+        searchingLargest = true
+        let root = root
+        Task.detached(priority: .utility) {
+            let files = DiskExplorer.largestFiles(under: root)
+            await MainActor.run { self.largest = files; self.searchingLargest = false; self.largestLoaded = true }
+        }
+    }
+
+    /// After a move to the Trash: drop the item, and forget the sizes of the folders that held it.
+    func removed(_ p: String) {
+        entries.removeAll { $0.path == p }
+        sizes[p] = nil
+        var q = p.parentPath
+        while q.count >= root.count { sizes[q] = nil; if q == root { break }; q = q.parentPath }
+        largest.removeAll { $0.path == p || $0.path.hasPrefix(p + "/") }
+        if selection == p { selection = nil }
+    }
+
     func refresh() {
         queue.cancelAllOperations()
         for e in entries { sizes[e.path] = nil }
@@ -86,6 +112,9 @@ final class ExplorerModel: ObservableObject {
 struct DiskMapView: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ex: ExplorerModel
+    @State private var trashTarget: (path: String, bytes: Int64)?
+    @State private var refusal: String?
+    @State private var status: String?
 
     private var rows: [DiskExplorer.Entry] {
         let q = model.search.trimmingCharacters(in: .whitespaces)
@@ -94,17 +123,81 @@ struct DiskMapView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PaneHeader(pane: .map, subtitle: ex.path == ex.root ? nil : ex.path.tildePath, value: Format.bytes(ex.total),
-                       caption: ex.measuring ? "Measuring \(ex.measured) of \(ex.entries.count)…" : "\(ex.entries.count) items") {
+            PaneHeader(pane: .map, subtitle: ex.mode == .largest ? "Single files of 200 MB or more anywhere in your home folder."
+                                                                 : ex.path == ex.root ? nil : ex.path.tildePath,
+                       value: ex.mode == .largest ? Format.bytes(ex.largest.reduce(0) { $0 + $1.bytes }) : Format.bytes(ex.total),
+                       caption: ex.mode == .largest ? (ex.searchingLargest ? "Searching…" : "\(ex.largest.count) files")
+                                                    : ex.measuring ? "Measuring \(ex.measured) of \(ex.entries.count)…" : "\(ex.entries.count) items") {
                 HStack(spacing: 8) {
+                    Picker("View", selection: $ex.mode) {
+                        ForEach(ExplorerModel.Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
                     Button { ex.up() } label: { Label("Back", systemImage: "chevron.left") }
-                        .disabled(ex.path == ex.root).keyboardShortcut("[", modifiers: .command)
+                        .disabled(ex.path == ex.root || ex.mode == .largest).keyboardShortcut("[", modifiers: .command)
                         .help("Up one folder (⌘[)")
-                    Button { ex.refresh() } label: { Label("Measure again", systemImage: "arrow.clockwise") }
-                        .help("Measure this folder again")
+                    Button { ex.mode == .largest ? ex.findLargest(force: true) : ex.refresh() } label: { Label("Measure again", systemImage: "arrow.clockwise") }
+                        .help("Measure again")
                 }
                 .labelStyle(.iconOnly)
             }
+            if ex.mode == .largest {
+                largestList
+            } else {
+                folders
+            }
+            Text(status ?? "Nothing is removed unless you choose Move to Trash. It goes to the Trash with a receipt, so Receipts can put it back.")
+                .font(.caption).foregroundStyle(status == nil ? Color.secondary : Color.blue)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .overlay(alignment: .top) { Divider() }
+        }
+        .onAppear { ex.startIfNeeded() }
+        .onChange(of: ex.mode) { _, m in if m == .largest { ex.findLargest() } }
+        .onChange(of: ex.selection) { _, p in
+            model.focused = p.flatMap { p in model.snapshot.findings.first { $0.path == p && $0.category != .home }?.id }
+        }
+        .confirmationDialog(trashTarget.map { "Move “\($0.path.lastComponent)” to the Trash?" } ?? "",
+                            isPresented: Binding(get: { trashTarget != nil }, set: { if !$0 { trashTarget = nil } })) {
+            Button("Move to Trash", role: .destructive) { if let t = trashTarget { moveToTrash(t.path, t.bytes) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let t = trashTarget { Text("\(Format.bytes(t.bytes)) at \(t.path.tildePath). It stays in the Trash until you empty it, and Receipts can put it back.") }
+        }
+        .alert("Sapu won't move this", isPresented: Binding(get: { refusal != nil }, set: { if !$0 { refusal = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(refusal ?? "") }
+    }
+
+    /// Checks first, so a refused item explains why instead of asking.
+    private func askTrash(_ p: String, _ bytes: Int64) {
+        if let why = DiskExplorer.trashRefusal(p, projects: model.snapshot.projects) { refusal = why } else { trashTarget = (p, bytes) }
+    }
+
+    private func moveToTrash(_ p: String, _ bytes: Int64) {
+        let projects = model.snapshot.projects
+        status = "Moving \(p.lastComponent) to the Trash…"
+        Task.detached(priority: .userInitiated) {
+            let r = DiskExplorer.moveToTrash(p, bytes: bytes, projects: projects)
+            await MainActor.run {
+                status = r.message
+                if r.ok { ex.removed(p) }
+                model.receipts = Store.receipts()
+            }
+        }
+    }
+
+    @ViewBuilder private func menu(_ p: String, bytes: Int64) -> some View {
+        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+        Button("Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(p, forType: .string)
+        }
+        Divider()
+        Button("Move to Trash…", role: .destructive) { askTrash(p, bytes) }
+    }
+
+    @ViewBuilder private var folders: some View {
             breadcrumbs
             Divider()
             if ex.entries.isEmpty {
@@ -115,26 +208,43 @@ struct DiskMapView: View {
                 }
                 .listStyle(.inset)
                 .contextMenu(forSelectionType: String.self) { ids in
-                    if let p = ids.first {
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
-                        Button("Copy Path") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(p, forType: .string)
-                        }
-                    }
+                    if let p = ids.first { menu(p, bytes: ex.sizes[p]?.bytes ?? 0) }
                 } primaryAction: { ids in
                     if let p = ids.first, let e = ex.entries.first(where: { $0.path == p }), e.isFolder, e.sealed == nil { ex.open(p) }
                 }
             }
-            Text("Measured only: nothing is removed here. Items Sapu can clean show a badge; select one for details, clean it from its tab.")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16).padding(.vertical, 8)
-                .overlay(alignment: .top) { Divider() }
-        }
-        .onAppear { ex.startIfNeeded() }
-        .onChange(of: ex.selection) { _, p in
-            model.focused = p.flatMap { p in model.snapshot.findings.first { $0.path == p && $0.category != .home }?.id }
+    }
+
+    @ViewBuilder private var largestList: some View {
+        if ex.largest.isEmpty {
+            if ex.searchingLargest {
+                ProgressView("Looking through your home folder for big files…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                EmptyState(symbol: "doc", title: "No files of 200 MB or more", message: "Nothing that big outside private folders.")
+            }
+        } else {
+            let top = ex.largest.first?.bytes ?? 1
+            List(selection: $ex.selection) {
+                ForEach(ex.largest) { f in
+                    HStack(spacing: 12) {
+                        Image(systemName: "doc.fill").foregroundStyle(Pane.map.tint).frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(f.path.lastComponent).lineLimit(1).truncationMode(.middle)
+                            Text("\(f.path.parentPath.tildePath)\(f.modified.map { " · changed \(Format.age($0))" } ?? "")")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 12)
+                        RelativeBar(value: f.bytes, max: top, color: Pane.map.tint).frame(width: 120)
+                        Text(Format.bytes(f.bytes)).font(.body.monospacedDigit().weight(.semibold)).frame(width: 84, alignment: .trailing)
+                    }
+                    .padding(.vertical, 3)
+                    .tag(f.path)
+                }
+            }
+            .listStyle(.inset)
+            .contextMenu(forSelectionType: String.self) { ids in
+                if let p = ids.first, let f = ex.largest.first(where: { $0.path == p }) { menu(p, bytes: f.bytes) }
+            }
         }
     }
 
