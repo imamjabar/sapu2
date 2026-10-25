@@ -7687,7 +7687,7 @@
       ]
     }
   ],
-  "mole" : {
+  "reference" : {
     "1Password" : [
       "~/Library/Application Support/1Password",
       "~/Library/Logs/1Password",
@@ -11647,10 +11647,10 @@
       "~/Library/Preferences/com.kingsoft.kdocs.mac.plist"
     ]
   },
-  "moleMistakes" : {
+  "referenceMistakes" : {
     "Microsoft Edge" : {
       "~/Library/Application Support/Microsoft" : "Microsoft's shared vendor folder: Office, Teams, OneDrive and AutoUpdate keep their data in it too. Edge's own data is in ~/Library/Application Support/Microsoft Edge."
     }
   },
-  "moleVersion" : "1.62.0"
+  "referenceVersion" : "1.62.0"
 }

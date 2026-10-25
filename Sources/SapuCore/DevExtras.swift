@@ -3,7 +3,7 @@ import Foundation
 /// What AI coding agents, IDEs and chat apps leave behind, beyond plain caches: finished agent jobs, agent
 /// worktrees, settings of IDE versions you upgraded from, old runtime releases. Plus large data that only its
 /// own app should remove (VM disks, model libraries), listed so the space is explained, never cleaned.
-/// Locations checked against what Mole cleans or reports; no Mole code is used.
+/// Locations checked against what a reference cleaner cleans or reports; none of its code is used.
 public enum DevExtras {
     public struct Candidate: Sendable, Hashable {
         public var path: String

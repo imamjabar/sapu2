@@ -196,8 +196,13 @@ public enum Uninstaller {
             if !found.isEmpty { secrets.mutate { $0[i] = found } }
         }
         let locked = secrets.value
+        // Bloat comes out first: the cache folders inside every data folder are offered on their own, while
+        // the folder (settings, sign-ins, your data) stays unless you choose it.
+        let holders = paths.indices.dropFirst().filter { i in
+            locked[i] != nil || (classify(paths[i]) == .data && earlierVersion(paths[i], of: app) == nil && !holdBack(paths[i]))
+        }
         var all = paths, parent: [Int: Int] = [:]
-        for i in locked.keys.sorted() where DiskSizer.isDirectory(paths[i]) {
+        for i in holders where DiskSizer.isDirectory(paths[i]) {
             for b in Credentials.bloat(in: paths[i]) { parent[all.count] = i; all.append(b) }
         }
         // Sizing is most of the work (the app bundle alone can be 3 GB of small files): a few folders at a time.
@@ -228,6 +233,10 @@ public enum Uninstaller {
             let hold = old != nil || holdBack(path)
             items.append(UninstallItem(path: path, kind: kind, bytes: bytes[i], selected: !hold && (kind == .cache || kind == .agent),
                                        holdBack: hold, note: note(for: path, kind: kind, hold: hold, earlier: old)))
+            for b in bloat where parent[b] == i {
+                items.append(UninstallItem(path: all[b], kind: .cache, bytes: bytes[b], selected: true, holdBack: false,
+                                           note: "Cache inside \(path.lastComponent). Rebuilt by the app; the rest of that folder stays unless you choose it."))
+            }
         }
         return UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
     }
@@ -246,6 +255,10 @@ public enum Uninstaller {
         // A few apps keep real data under Caches (Spotify offline songs, Raycast clipboard images).
         let cacheData = ["com.spotify.client", "com.raycast.macos", "MullvadBrowser"]
         if p.hasPrefix(lib + "/Caches/"), !cacheData.contains(where: { p.hasPrefix(lib + "/Caches/" + $0) }) { return .cache }
+        // Cache folders and log files inside an app's data (Application Support/<app>/Cache, a container's
+        // Data/Library/Caches, ShipIt_stderr.log) are rebuilt too.
+        if Credentials.cacheFolders.contains(p.lastComponent.lowercased()) || p.lowercased().hasSuffix(".log")
+            || p.hasPrefix(lib + "/Application Support/Caches/") { return .cache }
         if p.hasPrefix(lib + "/Logs/") || p.hasPrefix(lib + "/HTTPStorages/") || p.hasPrefix(lib + "/Application Support/CrashReporter/")
             || p.hasPrefix(home + "/.cache/") || p.hasPrefix(lib + "/Saved Application State/")
             || p.hasPrefix(lib + "/Logs/DiagnosticReports/") { return .cache }
@@ -254,9 +267,10 @@ public enum Uninstaller {
 
     public static func holdBack(_ p: String) -> Bool {
         let l = p.lowercased(), support = (lib + "/Application Support/").lowercased()
-        if l.hasPrefix((lib + "/Group Containers/").lowercased()) { return true }
-        let profiles = ["google/chrome", "bravesoftware", "microsoft edge", "com.operasoftware.opera", "chromium", "vivaldi", "arc",
-                        "firefox", "zen", "crossover", "openemu"]
+        if l.hasPrefix((lib + "/Group Containers/").lowercased()) || l.hasPrefix((lib + "/Caches/Dia/User Data").lowercased()) { return true }
+        // Browser profiles, matching the roots the reference cleaner's own guard protects (Chrome's debug profile, Arc under its ID, Helium, Dia).
+        let profiles = ["google/chrome", "google/chromedebug", "bravesoftware", "microsoft edge", "com.operasoftware.opera", "chromium", "vivaldi",
+                        "arc", "company.thebrowser.browser", "net.imput.helium", "dia", "firefox", "zen", "crossover", "openemu"]
         if profiles.contains(where: { l == support + $0 || l.hasPrefix(support + $0 + "/") || l.hasPrefix(support + $0 + " ") }) { return true }
         // Home dot folders can hold projects, keys or settings shared with command-line tools.
         if p.parentPath == home, p.lastComponent.hasPrefix(".") { return true }
@@ -555,6 +569,15 @@ public enum Uninstaller {
         }
 
         for p in productSpecific(app, id: id, fs: fs) { add(p) }
+        // The reference tool's hand-tested record for this app, unless the folder is named after another installed app.
+        for p in ReferenceGuides.paths(for: app) {
+            var leaf = p.lastComponent.lowercased()
+            for ext in [".plist", ".savedstate", ".binarycookies"] where leaf.hasSuffix(ext) { leaf = String(leaf.dropLast(ext.count)) }
+            if otherIDs.contains(leaf) || (leaf != own && otherNames.contains(leaf)) { continue }
+            // Already inside a folder found for this app (iTerm2/Scripts): the folder covers it.
+            if found.contains(where: { p.lowercased().hasPrefix($0.lowercased() + "/") }) { continue }
+            add(p)
+        }
         return found
     }
 
@@ -708,8 +731,8 @@ public enum Uninstaller {
         return [home, home + "/.config", home + "/.local/share", home + "/.cache"].contains(p.parentPath)
     }
 
-    /// A folder named after a command-line tool you installed separately: ~/.config/mole and ~/Library/Logs/mole
-    /// belong to Homebrew's `mole`, not to Mole.app. A tool that links back into the app (VS Code's `code`) is the app's own.
+    /// A folder named after a command-line tool you installed separately: ~/.config/broom and ~/Library/Logs/broom
+    /// belong to a Homebrew `broom` CLI, not to a Broom.app. A tool that links back into the app (VS Code's `code`) is the app's own.
     static let cliBins = ["/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.cargo/bin", "~/go/bin", "~/.bun/bin"]
     static func isOtherCLI(_ p: String, of app: InstalledApp, _ fs: FileView) -> Bool {
         let parents = [home, home + "/.config", home + "/.cache", home + "/.local/share", home + "/.local/state", lib + "/Logs"]

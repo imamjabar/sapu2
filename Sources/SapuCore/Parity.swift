@@ -1,8 +1,8 @@
 import Foundation
 
-/// The release check's memory of one Mac: every answer the leftover finder got from the disk, Mole's
+/// The release check's memory of one Mac: every answer the leftover finder got from the disk, the reference tool's
 /// leftovers for each app, and the hand review of every path. Replaying it re-runs the finder on that
-/// Mac without the Mac, so a later change that claims a new path, loses one of Mole's, or lets two apps
+/// Mac without the Mac, so a later change that claims a new path, loses one of the reference tool's, or lets two apps
 /// claim the same path fails `sapu-cli selftest`.
 public struct ParityFixture: Codable, Sendable {
     public struct App: Codable, Sendable {
@@ -33,20 +33,20 @@ public struct ParityFixture: Codable, Sendable {
         }
     }
     public var made: String
-    public var moleVersion: String
+    public var referenceVersion: String
     public var apps: [App]
     public var disk: Disk
-    /// Mole's leftovers per app name.
-    public var mole: [String: [String]]
-    /// Paths Mole claims that Sapu deliberately leaves, with the reason. Keyed by app name, then path.
-    public var moleMistakes: [String: [String: String]]
+    /// The reference tool's leftovers per app name.
+    public var reference: [String: [String]]
+    /// Paths the reference tool claims that Sapu deliberately leaves, with the reason. Keyed by app name, then path.
+    public var referenceMistakes: [String: [String: String]]
     /// Every path Sapu claims, reviewed by hand once: app name → path → why it belongs to that app.
     public var reviewed: [String: [String: String]]
 
-    public init(made: String, moleVersion: String, apps: [App], disk: Disk, mole: [String: [String]],
-                moleMistakes: [String: [String: String]], reviewed: [String: [String: String]]) {
-        self.made = made; self.moleVersion = moleVersion; self.apps = apps; self.disk = disk; self.mole = mole
-        self.moleMistakes = moleMistakes; self.reviewed = reviewed
+    public init(made: String, referenceVersion: String, apps: [App], disk: Disk, reference: [String: [String]],
+                referenceMistakes: [String: [String: String]], reviewed: [String: [String: String]]) {
+        self.made = made; self.referenceVersion = referenceVersion; self.apps = apps; self.disk = disk; self.reference = reference
+        self.referenceMistakes = referenceMistakes; self.reviewed = reviewed
     }
 
     static let home = NSHomeDirectory()
@@ -107,9 +107,9 @@ public struct ParityFixture: Codable, Sendable {
         }
         for a in apps {
             let mine = (found[a.name] ?? []).map(ParityFixture.tilde)
-            // 1. Everything Mole finds, Sapu finds, or it is a written-down Mole mistake.
-            for p in mole[a.name] ?? [] where !covered(p, by: mine) && moleMistakes[a.name]?[p] == nil {
-                out.append("\(a.name): Mole finds \(p), Sapu doesn't, and it isn't on the Mole-mistakes list")
+            // 1. Everything the reference finds, Sapu finds, or it is a written-down reference mistake.
+            for p in reference[a.name] ?? [] where !covered(p, by: mine) && referenceMistakes[a.name]?[p] == nil {
+                out.append("\(a.name): reference finds \(p), Sapu doesn't, and it isn't on the reference-mistakes list")
             }
             // 2. Nothing Sapu claims goes unreviewed.
             for p in mine where reviewed[a.name]?[p] == nil {
@@ -140,21 +140,21 @@ extension Uninstaller {
     }
 }
 
-/// Mole's tested apps (the 851 on its compatibility list that Homebrew documents), all installed side by side in a
-/// home folder holding exactly their documented leftovers, and what Mole's finder claimed there. Replayed by
-/// `sapu-cli selftest`: Sapu must find every Mole path (bar written-down Mole mistakes) and no path may go to two apps.
+/// The reference tool's tested apps (those on its compatibility list that Homebrew documents), all installed side by side in a
+/// home folder holding exactly their documented leftovers, and what the reference finder claimed there. Replayed by
+/// `sapu-cli selftest`: Sapu must find every reference path (bar written-down reference mistakes) and no path may go to two apps.
 public struct TestedFixture: Codable, Sendable {
     public struct App: Codable, Sendable {
         public var name: String; public var id: String; public var zap: [String]
         public init(name: String, id: String, zap: [String]) { self.name = name; self.id = id; self.zap = zap }
     }
-    public var moleVersion: String
+    public var referenceVersion: String
     public var apps: [App]
-    public var mole: [String: [String]]
-    public var moleMistakes: [String: [String: String]]
+    public var reference: [String: [String]]
+    public var referenceMistakes: [String: [String: String]]
 
-    public init(moleVersion: String, apps: [App], mole: [String: [String]], moleMistakes: [String: [String: String]]) {
-        self.moleVersion = moleVersion; self.apps = apps; self.mole = mole; self.moleMistakes = moleMistakes
+    public init(referenceVersion: String, apps: [App], reference: [String: [String]], referenceMistakes: [String: [String: String]]) {
+        self.referenceVersion = referenceVersion; self.apps = apps; self.reference = reference; self.referenceMistakes = referenceMistakes
     }
 
     public func found() -> [String: [String]] {
@@ -174,9 +174,9 @@ public struct TestedFixture: Codable, Sendable {
         var out: [String] = []
         for a in apps {
             let mine = (found[a.name] ?? []).map { $0.lowercased() }
-            for p in mole[a.name] ?? [] where moleMistakes[a.name]?[p] == nil {
+            for p in reference[a.name] ?? [] where referenceMistakes[a.name]?[p] == nil {
                 let l = p.lowercased()
-                if !mine.contains(where: { l == $0 || l.hasPrefix($0 + "/") }) { out.append("\(a.name): Mole finds \(p), Sapu doesn't") }
+                if !mine.contains(where: { l == $0 || l.hasPrefix($0 + "/") }) { out.append("\(a.name): reference finds \(p), Sapu doesn't") }
             }
         }
         var owner: [String: String] = [:]

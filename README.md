@@ -66,8 +66,9 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 
 **Tested:**
 
-- On this Mac's 60 apps, Sapu found every leftover path Mole's finder found, plus 16 more.
-- For the 628 apps on Mole's tested-apps list that Homebrew documents, Sapu's rules find 71% of the 3,918 documented leftover paths in a simulated home folder. Most of the remainder belongs to helper apps that Sapu finds by reading the installed app.
+- On this Mac's 60 apps, Sapu found every leftover path the reference cleaner's finder found, plus 16 more.
+- For the 628 apps on the reference cleaner's tested-apps list that Homebrew documents, Sapu's rules find 71% of the 3,918 documented leftover paths in a simulated home folder. Most of the remainder belongs to helper apps that Sapu finds by reading the installed app.
+- For all 851 apps on the reference cleaner's tested-apps list, Sapu finds every one of the 3,029 leftover paths its guides say go with the app, with all apps installed side by side and no path given to two apps (`Tests/reference-guides-fixture.json`). 24 paths the guides name are kept on purpose: data of a separate command-line tool (Claude Code, Codex, opencode), a sibling app (Chromium, IntelliJ IDEA CE) or your games. Only app names and paths were taken from the guides (`scripts/gen-reference-guides.py`).
 - Run `sapu-cli coverage cask.json names.txt` to reproduce.
 
 ### Developer and AI tool leftovers
@@ -113,7 +114,7 @@ Secrets are shown masked (first 8 characters and the length), each with the exac
 - **Browsers** (Chrome, Arc, Brave, Edge, Vivaldi, Opera): only named cache folders per profile (page cache, service-worker cache, GPU and shader caches, downloaded components). Logins, history, bookmarks and extensions are never touched. Locked while the browser runs.
 - **Old tool versions:** Claude Code versions other than the one in use (and any a running process uses), Google Updater's installed packages, the PyInstaller cache. The previous Chrome version inside the app is shown with a hint to restart Chrome; Sapu does not edit files inside apps.
 - **App caches and logs** inside `~/Library/Application Support/<app>`.
-- **Known locations of ~400 apps and tools** (AppCatalog), cross-checked against the locations [Mole](https://github.com/tw93/Mole) cleans. Only paths were used; Mole is GPL-3.0 and none of its code or text is included. macOS's own caches are marked "Check first" because rebuilding them costs time and battery.
+- **Known locations of ~400 apps and tools** (AppCatalog), cross-checked against the locations a reference open-source cleaner cleans. Only paths were used; that project is GPL-3.0 and none of its code or text is included. macOS's own caches are marked "Check first" because rebuilding them costs time and battery.
 - **Build output:** PyInstaller `build`/`dist` (next to a `.spec`), dbt `target`/`dbt_packages`, and renamed dependency folders such as `node_modules-old`, listed as one item. Folders inside a dependency tree are never listed on their own.
 - Projects older than 90 days that are kept only because of uncommitted changes are labelled **Uncommitted work**.
 
@@ -175,6 +176,6 @@ scripts/           build, package (DMG), icon
 
 ## Credits
 
-Inspired by [Shedi](https://shedi.app), [Mole](https://github.com/tw93/Mole), [diskreceipt](https://github.com/abdiraimov-otabek/diskreceipt), [TidyDisk](https://github.com/prateekcode/tidydisk) and [PandaCode](https://github.com/aicodeking/pandacode).
+Inspired by [Shedi](https://shedi.app), [diskreceipt](https://github.com/abdiraimov-otabek/diskreceipt), [TidyDisk](https://github.com/prateekcode/tidydisk) and [PandaCode](https://github.com/aicodeking/pandacode).
 
 MIT License.

@@ -7,7 +7,7 @@ public enum Credentials {
     /// Folders that only ever hold rebuildable data. Not searched for credentials, and offered as bloat.
     static let cacheFolders: Set<String> = ["cache", "code cache", "gpucache", "dawncache", "dawngraphitecache", "dawnwebgpucache",
                                             "grshadercache", "shadercache", "graphitedawncache", "cachestorage", "scriptcache",
-                                            "cacheddata", "cachedextensionvsixs", "cachedprofilesdata", "caches", "tmp"]
+                                            "cacheddata", "cachedextensionvsixs", "cachedprofilesdata", "caches", "tmp", "blob_storage", "logs"]
     /// Not searched: other people's code (certificate bundles in node_modules or a venv aren't your keys).
     static let skipped: Set<String> = ["node_modules", "site-packages", "extensions", ".git"]
     /// Bundles carry the vendor's own files (public update keys, CA bundles), never your sign-ins.
@@ -22,12 +22,12 @@ public enum Credentials {
             || n.hasSuffix("credentialcache")
     }
 
-    /// True when a file's name marks it as a sign-in or a key.
+    /// True when a file's name marks it as a sign-in or a key. `key_datas` is Telegram Desktop's login key.
     public static func isCredential(name: String, inKeychains: Bool = false) -> Bool {
         let n = name.lowercased()
         if inKeychains { return true }
         if n.hasSuffix(".binarycookies") || n == "cookies" || n == "cookies.json" || n == "login data" || n == "login data for account"
-            || n == "web data" || n == ".netrc" || n.hasPrefix("id_rsa") || n.hasPrefix("id_ed25519") || n.hasPrefix("id_ecdsa") { return true }
+            || n == "web data" || n == ".netrc" || n == "key_datas" || n.hasPrefix("id_rsa") || n.hasPrefix("id_ed25519") || n.hasPrefix("id_ecdsa") { return true }
         if n.hasPrefix(".env") || [".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx", ".ppk"].contains(where: n.hasSuffix) { return true }
         // Words alone mark a store only when the file isn't a log, document or source file about the subject.
         let ext = (n as NSString).pathExtension

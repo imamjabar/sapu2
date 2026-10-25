@@ -186,6 +186,11 @@ func selftest() -> Int32 {
     check(Uninstaller.holdBack("\(L)/Group Containers/EQHXZ8M8AV.com.google.Chrome") && Uninstaller.holdBack("\(L)/Application Support/Google/Chrome")
           && Uninstaller.classify("\(L)/Caches/com.google.Chrome") == .cache && Uninstaller.classify("\(L)/Preferences/com.google.Chrome.plist") == .data,
           "uninstall: caches preselected, data kept, profiles and app groups held back")
+    check(["Google/ChromeDebug", "company.thebrowser.Browser", "net.imput.helium", "Dia/User Data"].allSatisfy { Uninstaller.holdBack("\(L)/Application Support/\($0)") }
+          && Uninstaller.holdBack("\(L)/Caches/Dia/User Data"), "uninstall: holds back every browser profile the reference protects")
+    check(Uninstaller.classify("\(L)/Application Support/apifox/blob_storage") == .cache && Uninstaller.classify("\(L)/Application Support/ShipIt_stderr.log") == .cache
+          && Uninstaller.classify("\(L)/Containers/com.utmapp.UTM/Data/Library/Caches") == .cache && Uninstaller.classify("\(L)/Application Support/apifox") == .data
+          && Credentials.isCredential(name: "key_datas"), "uninstall: bloat inside data goes first, the data and Telegram's login key stay")
     let subs = Uninstaller.FileView.simulated([
         "\(L)/Preferences/com.google.GeminiMacOS.launcher.plist", "\(L)/Preferences/com.google.GeminiMacOS.beta.plist",
         "\(L)/Containers/com.microsoft.errorreporting/x", "\(L)/Application Support/com.evernote.EvernoteHelper/x",
@@ -237,7 +242,7 @@ func selftest() -> Int32 {
     check(profs == ["", "/Default", "/User Data", "/Partitions/notion", "/Partitions/x", "/User Data/Profile 1"],
           "scan: Electron profiles found in Partitions, Default and User Data (\(profs.sorted()))")
 
-    // Agents, IDEs and chat apps (Mole 1.18's developer and AI cleanup), on a fake home.
+    // Agents, IDEs and chat apps (the reference tool's developer and AI cleanup), on a fake home.
     let dh = root + "/DevHome"
     let old = "2026-01-01T00:00:00.000Z"
     func put(_ f: String, _ text: String = "x") {
@@ -324,15 +329,15 @@ func selftest() -> Int32 {
     // Release-check finds: a separately installed CLI's folders, a vendor-wide updater, an earlier version's files.
     let H = NSHomeDirectory()
     var more = Uninstaller.FileView.simulated([
-        "/opt/homebrew/bin/mole", "\(H)/.config/Mole/x", "\(L)/Logs/Mole/x", "\(L)/Caches/com.tw93.MoleApp/x",
+        "/opt/homebrew/bin/broom", "\(H)/.config/Broom/x", "\(L)/Logs/Broom/x", "\(L)/Caches/com.example.BroomApp/x",
         "/Applications/Google Chrome.app/Contents/Frameworks/G.framework/Helpers/GoogleUpdater.app/Contents/Info.plist",
         "\(L)/Caches/com.google.GoogleUpdater/x", "\(L)/Preferences/com.microsoft.teams.plist", "\(L)/Preferences/com.microsoft.teams2.plist",
     ])
     more.bundleID = { $0.hasSuffix("GoogleUpdater.app") ? "com.google.GoogleUpdater" : nil }
-    let moleApp = InstalledApp(path: "/Applications/Mole.app", name: "Mole", bundleID: "com.tw93.MoleApp")
-    let moleL = Uninstaller.leftovers(for: moleApp, fs: more)
-    check(moleL.contains("\(L)/Caches/com.tw93.MoleApp") && !moleL.contains { $0.contains("/Mole/") || $0.hasSuffix("/Mole") },
-          "uninstall: folders of a separately installed CLI (Homebrew mole) stay with Mole.app's removal")
+    let broomApp = InstalledApp(path: "/Applications/Broom.app", name: "Broom", bundleID: "com.example.BroomApp")
+    let broomL = Uninstaller.leftovers(for: broomApp, fs: more)
+    check(broomL.contains("\(L)/Caches/com.example.BroomApp") && !broomL.contains { $0.contains("/Broom/") || $0.hasSuffix("/Broom") },
+          "uninstall: folders of a separately installed CLI (Homebrew broom) stay with Broom.app's removal")
     let chrome3 = Uninstaller.leftovers(for: InstalledApp(path: "/Applications/Google Chrome.app", name: "Google Chrome", bundleID: "com.google.Chrome"), fs: more)
     check(!chrome3.contains { $0.contains("GoogleUpdater") }, "uninstall: Google's shared updater is never one app's leftover")
     let teams = InstalledApp(path: "/Applications/Microsoft Teams.app", name: "Microsoft Teams", bundleID: "com.microsoft.teams2")
@@ -360,11 +365,11 @@ func selftest() -> Int32 {
     let t = Cleaner.truncateLogs(log)
     check(t.0 && (try? fm.attributesOfItem(atPath: log)[.size] as? Int) == 0, "truncate empties log in place")
 
-    // Release rule, replayed from this Mac's recording: everything Mole finds, nothing unreviewed, no path for two apps.
+    // Release rule, replayed from this Mac's recording: everything the reference finds, nothing unreviewed, no path for two apps.
     if let fx = loadParity() {
         let problems = fx.problems(found: Uninstaller.leftoversForAll(fx.installedApps, fs: fx.replay()))
         for p in problems.prefix(20) { print("    \(p)") }
-        check(problems.isEmpty, "uninstall parity: \(fx.apps.count) apps, all of Mole's \(fx.mole.values.reduce(0) { $0 + $1.count }) paths covered, \(fx.reviewed.values.reduce(0) { $0 + $1.count }) claims reviewed, none shared")
+        check(problems.isEmpty, "uninstall parity: \(fx.apps.count) apps, all of the reference's \(fx.reference.values.reduce(0) { $0 + $1.count }) paths covered, \(fx.reviewed.values.reduce(0) { $0 + $1.count }) claims reviewed, none shared")
     } else {
         check(false, "uninstall parity: \(parityURL.path) is missing (run scripts/release-check.sh)")
     }
@@ -372,9 +377,19 @@ func selftest() -> Int32 {
     if let d = try? Data(contentsOf: testedURL), let tf = try? JSONDecoder().decode(TestedFixture.self, from: d) {
         let problems = tf.problems(found: tf.found())
         for p in problems.prefix(20) { print("    \(p)") }
-        check(problems.isEmpty, "Mole's tested apps: \(tf.apps.count) installed side by side, all \(tf.mole.values.reduce(0) { $0 + $1.count }) of Mole's paths covered, none shared")
+        check(problems.isEmpty, "reference tested apps: \(tf.apps.count) installed side by side, all \(tf.reference.values.reduce(0) { $0 + $1.count }) of its paths covered, none shared")
     } else {
-        check(false, "Mole's tested apps: \(testedURL.path) is missing")
+        check(false, "reference tested apps: \(testedURL.path) is missing")
+    }
+
+    // The reference tool's hand-tested app guides: every path they say goes with the app, all apps side by side.
+    let guidesURL = parityURL.deletingLastPathComponent().appendingPathComponent("reference-guides-fixture.json")
+    if let d = try? Data(contentsOf: guidesURL), let gf = try? JSONDecoder().decode(TestedFixture.self, from: d) {
+        let problems = gf.problems(found: gf.found())
+        for p in problems.prefix(20) { print("    \(p)") }
+        check(problems.isEmpty, "reference guides: \(gf.apps.count) apps side by side, all \(gf.reference.values.reduce(0) { $0 + $1.count }) removable paths found, none shared")
+    } else {
+        check(false, "reference guides: \(guidesURL.path) is missing")
     }
 
     print(failures == 0 ? "All checks passed." : "\(failures) check(s) failed.")
@@ -396,8 +411,8 @@ func saveParity(_ fx: ParityFixture) {
     try? enc.encode(fx).write(to: parityURL, options: .atomic)
 }
 
-/// Mole's per-app output from scripts/release-check.sh: "### name|id|path" then one path per line.
-func readMole(_ file: String) -> [String: [String]] {
+/// The reference tool's per-app output from scripts/release-check.sh: "### name|id|path" then one path per line.
+func readReference(_ file: String) -> [String: [String]] {
     var out: [String: [String]] = [:], cur: String?
     for line in ((try? String(contentsOfFile: file, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init) {
         if line.hasPrefix("### ") { cur = String(line.dropFirst(4).split(separator: "|", omittingEmptySubsequences: false)[0]); out[cur!] = []; continue }
@@ -473,23 +488,23 @@ case "creds":
     // sapu-cli creds <path…>   what sign-ins or keys Sapu sees inside each path (read-only)
     for p in args.dropFirst() { print("\(Credentials.find(in: p, limit: 3).joined(separator: ", "))\t\(p)") }
 case "tested-record":
-    // sapu-cli tested-record <export dir> <mole.txt> [--version v]   save the tested-apps comparison for selftest
+    // sapu-cli tested-record <export dir> <reference.txt> [--version v]   save the tested-apps comparison for selftest
     guard args.count >= 3, let d = FileManager.default.contents(atPath: args[1] + "/zap.json"),
-          let raw = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { err("usage: sapu-cli tested-record <dir> <mole.txt>"); exit(2) }
-    // Each app gets the bundle ID Mole was given (the "### name|id|path" lines), so both tools judge the same app.
-    var moleIDs: [String: String] = [:]
+          let raw = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] else { err("usage: sapu-cli tested-record <dir> <reference.txt>"); exit(2) }
+    // Each app gets the bundle ID the reference was given (the "### name|id|path" lines), so both tools judge the same app.
+    var referenceIDs: [String: String] = [:]
     for line in ((try? String(contentsOfFile: args[2], encoding: .utf8)) ?? "").split(separator: "\n") where line.hasPrefix("### ") {
         let f = line.dropFirst(4).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        if f.count > 1 { moleIDs[f[0]] = f[1] }
+        if f.count > 1 { referenceIDs[f[0]] = f[1] }
     }
     let apps = raw.map { r -> TestedFixture.App in
         let name = r["name"] as? String ?? ""
-        return TestedFixture.App(name: name, id: moleIDs[name] ?? r["id"] as? String ?? "", zap: r["zap"] as? [String] ?? [])
+        return TestedFixture.App(name: name, id: referenceIDs[name] ?? r["id"] as? String ?? "", zap: r["zap"] as? [String] ?? [])
     }
     let version = args.firstIndex(of: "--version").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "?"
     let url = parityURL.deletingLastPathComponent().appendingPathComponent("tested-apps-fixture.json")
     let old = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(TestedFixture.self, from: $0) }
-    let tf = TestedFixture(moleVersion: version, apps: apps, mole: readMole(args[2]), moleMistakes: old?.moleMistakes ?? [:])
+    let tf = TestedFixture(referenceVersion: version, apps: apps, reference: readReference(args[2]), referenceMistakes: old?.referenceMistakes ?? [:])
     let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     try? enc.encode(tf).write(to: url, options: .atomic)
     let problems = tf.problems(found: tf.found())
@@ -497,7 +512,7 @@ case "tested-record":
     print(problems.isEmpty ? "Tested apps check passed: \(apps.count) apps." : "Tested apps check failed: \(problems.count) problem(s).")
     exit(problems.isEmpty ? 0 : 1)
 case "parity":
-    // sapu-cli parity record <mole.txt> [--version v]   re-record this Mac (keeps the hand review), then check
+    // sapu-cli parity record <reference.txt> [--version v]   re-record this Mac (keeps the hand review), then check
     // sapu-cli parity check                             check the saved recording
     // sapu-cli parity todo                              print what still needs a decision, as JSON
     let sub = args.dropFirst().first ?? "check"
@@ -509,9 +524,9 @@ case "parity":
         let (disk, _) = ParityFixture.record(apps: apps)
         let version = args.firstIndex(of: "--version").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "?"
         let df = ISO8601DateFormatter(); df.formatOptions = [.withFullDate]
-        fx = ParityFixture(made: df.string(from: Date()), moleVersion: version,
+        fx = ParityFixture(made: df.string(from: Date()), referenceVersion: version,
                            apps: apps.map { .init(name: $0.name, id: $0.bundleID, path: $0.path) }, disk: disk,
-                           mole: readMole(args[2]), moleMistakes: fx?.moleMistakes ?? [:], reviewed: fx?.reviewed ?? [:])
+                           reference: readReference(args[2]), referenceMistakes: fx?.referenceMistakes ?? [:], reviewed: fx?.reviewed ?? [:])
         saveParity(fx!)
     }
     guard let fx else { err("No recording yet. Run scripts/release-check.sh"); exit(2) }
@@ -521,9 +536,9 @@ case "parity":
         for a in fx.apps {
             let mine = (found[a.name] ?? []).map(ParityFixture.tilde)
             let unreviewed = mine.filter { fx.reviewed[a.name]?[$0] == nil }
-            let missed = (fx.mole[a.name] ?? []).filter { p in fx.moleMistakes[a.name]?[p] == nil &&
+            let missed = (fx.reference[a.name] ?? []).filter { p in fx.referenceMistakes[a.name]?[p] == nil &&
                 !mine.contains { p.lowercased() == $0.lowercased() || p.lowercased().hasPrefix($0.lowercased() + "/") } }
-            if !unreviewed.isEmpty || !missed.isEmpty { todo[a.name] = ["unreviewed": unreviewed, "moleOnly": missed] }
+            if !unreviewed.isEmpty || !missed.isEmpty { todo[a.name] = ["unreviewed": unreviewed, "referenceOnly": missed] }
         }
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         print(String(data: try! enc.encode(todo), encoding: .utf8)!)
@@ -531,7 +546,7 @@ case "parity":
     }
     let problems = fx.problems(found: found)
     for p in problems { print("✗ \(p)") }
-    print(problems.isEmpty ? "Release check passed: \(fx.apps.count) apps, Mole \(fx.moleVersion), recorded \(fx.made)." : "Release check failed: \(problems.count) problem(s).")
+    print(problems.isEmpty ? "Release check passed: \(fx.apps.count) apps, reference \(fx.referenceVersion), recorded \(fx.made)." : "Release check failed: \(problems.count) problem(s).")
     exit(problems.isEmpty ? 0 : 1)
 case "coverage":
     // sapu-cli coverage <cask.json> <app-names.txt>

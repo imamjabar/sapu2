@@ -1,7 +1,7 @@
 import Foundation
 
 /// Known cache, log and temp locations of popular Mac apps and developer tools, one glob each
-/// (`*` matches any name). Cross-checked against the locations Mole (github.com/tw93/Mole) cleans.
+/// (`*` matches any name). Cross-checked against the locations a reference open-source cleaner cleans.
 /// User-space only; Mail, Messages, cloud credentials, keychains, password managers and shell
 /// history are never listed.
 enum AppCatalog {
