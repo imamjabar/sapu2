@@ -514,7 +514,7 @@ public final class ScanEngine: @unchecked Sendable {
             let name = app.lastComponent
             if name.hasPrefix("com.apple.") { continue }
             // Electron apps keep Chromium caches per profile (Notion's Partitions, Codex's Default) as well as at the top.
-            var subs = ["Cache", "Caches", "Code Cache", "GPUCache", "blob_storage", "logs", "Logs"].map { (app + "/" + $0, $0) }
+            var subs = ["Cache", "Caches", "Code Cache", "GPUCache", "CachedData", "blob_storage", "logs", "Logs"].map { (app + "/" + $0, $0) }
             for root in Self.chromiumProfiles(app) {
                 for c in Self.chromiumCacheDirs + Self.chromiumSharedCaches where root != app || !["Cache", "Code Cache", "GPUCache"].contains(c) {
                     subs.append((root + "/" + c, String((root + "/" + c).dropFirst(app.count + 1))))
