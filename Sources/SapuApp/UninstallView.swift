@@ -37,7 +37,14 @@ struct UninstallView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(shown) { app in AppRow(app: app, selected: model.selectedApp == app.id).onTapGesture { model.choose(app) } }
+                        ForEach(shown) { app in
+                            HStack(spacing: 4) {
+                                Toggle("", isOn: Binding(get: { model.batch.contains(app.id) }, set: { _ in model.toggleBatch(app) }))
+                                    .toggleStyle(.checkbox).labelsHidden().help("Tick several apps to remove them together")
+                                AppRow(app: app, selected: model.selectedApp == app.id && model.batch.count < 2)
+                                    .onTapGesture { model.batch.removeAll(); model.batchPlans = []; model.choose(app) }
+                            }
+                        }
                     }
                     .padding(6)
                 }
@@ -46,7 +53,9 @@ struct UninstallView: View {
     }
 
     @ViewBuilder private var planPane: some View {
-        if model.planning {
+        if model.batch.count > 1 {
+            BatchPlanView()
+        } else if model.planning {
             ProgressView("Looking for everything this app left behind…").frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let plan = model.plan {
             PlanView(plan: plan)
@@ -196,5 +205,60 @@ struct PlanRow: View {
             return parts.count > 1 ? "\(parts.first!) › \(parts.dropFirst().joined(separator: "/"))" : String(parts.first ?? "")
         }
         return item.path.tildePath
+    }
+}
+
+/// Several apps ticked: one review, each app with its default plan. Click an app to change its choices.
+struct BatchPlanView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let plans = model.batchPlans, ok = plans.filter { $0.blocked == nil }
+        VStack(spacing: 0) {
+            if model.planningBatch && plans.isEmpty {
+                ProgressView("Looking for everything these apps left behind…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SectionTitle(title: "Remove \(model.batch.count) apps",
+                                     subtitle: "Each app goes with its caches, logs and background helpers. Your data, sign-ins and protected items stay. Click an app to change its choices.")
+                        ForEach(plans, id: \.app.id) { p in
+                            Card(tint: p.blocked == nil ? nil : .orange) {
+                                HStack(spacing: 12) {
+                                    Image(nsImage: NSWorkspace.shared.icon(forFile: p.app.path)).resizable().frame(width: 32, height: 32)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(p.app.name).font(.headline)
+                                        if let why = p.blocked { Text("Skipped: \(why)").font(.caption).foregroundStyle(.orange) }
+                                        else {
+                                            let kept = p.items.filter { !$0.selected }.count
+                                            Text("\(p.items.filter(\.selected).count) items go · \(kept) kept (your data, sign-ins)").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Text(Format.bytes(p.selectedBytes)).font(.body.monospacedDigit().weight(.semibold))
+                                    Button("Review") { if let a = model.installedApps.first(where: { $0.id == p.app.id }) { model.batch.removeAll(); model.batchPlans = []; model.choose(a) } }
+                                        .buttonStyle(.link)
+                                }
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(Format.bytes(ok.reduce(0) { $0 + $1.selectedBytes })) goes to the Trash").font(.headline.monospacedDigit())
+                        Text("\(ok.count) of \(plans.count) apps. Put back from the Trash or Receipts any time.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if model.uninstalling || model.planningBatch { ProgressView().controlSize(.small) }
+                    Button { model.uninstallBatch() } label: { Label("Uninstall \(ok.count) apps", systemImage: "trash") }
+                        .buttonStyle(GradientButtonStyle(tint: .purple))
+                        .disabled(ok.isEmpty || model.uninstalling || model.planningBatch)
+                }
+                .padding(.horizontal, 20).padding(.vertical, 12)
+                .background(.bar)
+            }
+        }
     }
 }

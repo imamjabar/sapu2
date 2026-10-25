@@ -138,6 +138,7 @@ struct MaintenanceView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         StartupSection()
+                        ExternalDrivesCard()
                         ForEach(model.tasks.sorted { rank($0) < rank($1) }) { t in TaskCard(task: t) }
                         Text("Every file a fix removes goes to the Trash and is listed in Receipts.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -146,7 +147,7 @@ struct MaintenanceView: View {
                 }
             }
         }
-        .onAppear { if model.tasks.isEmpty { model.checkMaintenance() }; model.loadStartup() }
+        .onAppear { if model.tasks.isEmpty { model.checkMaintenance() }; model.loadStartup(); model.loadDrives() }
     }
 
     private func rank(_ t: MaintenanceTask) -> Int { t.status == .attention ? 0 : t.status == .info ? 1 : 2 }
@@ -250,10 +251,11 @@ struct StartupRow: View {
                 if model.startupBusy == item.id { ProgressView().controlSize(.small) } else {
                     if item.programMissing {
                         Button("Remove") { model.startup(item, .remove) }.help("Stop it and move its file to the Trash (Receipts can put it back)")
-                    } else if item.disabled {
-                        Button("Turn on") { model.startup(item, .turnOn) }
                     } else {
-                        Button("Turn off") { model.startup(item, .turnOff) }.help("Stop it now and keep it off after restarts. The file stays.")
+                        Toggle("", isOn: Binding(get: { !item.disabled }, set: { on in model.startup(item, on ? .turnOn : .turnOff) }))
+                            .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                            .help(item.disabled ? "Off: it won't start at login. Switch on to allow it again."
+                                                : "On. Switch off to stop it now and keep it off after restarts; the file stays.")
                     }
                 }
             }
@@ -296,6 +298,48 @@ struct DevProcessCard: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Mac bookkeeping files on USB sticks and external drives, removed only when you ask, after a confirmation.
+struct ExternalDrivesCard: View {
+    @EnvironmentObject var model: AppModel
+    @State private var confirm: ExternalDrives.Drive?
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("External drives").font(.headline)
+                    Spacer()
+                    Button { model.loadDrives() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.borderless).help("Look again")
+                }
+                Text("Finder leaves .DS_Store files on drives, and ._ files on drives formatted for Windows. They show up on other computers. Your files stay.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if model.drives.isEmpty { Text("No external drive connected.").font(.callout).foregroundStyle(.secondary) }
+                ForEach(model.drives, id: \.drive.id) { d, j in
+                    HStack(alignment: .top) {
+                        Image(systemName: "externaldrive").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(d.name) · \(d.format)")
+                            Text(j.count == 0 ? "Nothing to remove." : "\(j.dsStore.count) .DS_Store, \(j.appleDouble.count) ._ files · \(Format.bytes(j.bytes))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if let m = model.driveResults[d.id] { Text(m).font(.caption).foregroundStyle(.blue) }
+                        }
+                        Spacer()
+                        if model.driveBusy == d.id { ProgressView().controlSize(.small) }
+                        else if j.count > 0 { Button("Clean…") { confirm = d } }
+                    }
+                }
+            }
+        }
+        .confirmationDialog(confirm.map { "Remove Mac bookkeeping files from \($0.name)?" } ?? "",
+                            isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } })) {
+            Button("Remove") { if let d = confirm, let j = model.drives.first(where: { $0.drive.id == d.id })?.junk { model.cleanDrive(d, j) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(".DS_Store files go to the drive's Trash. ._ files are merged back into their files by macOS's dot_clean. Nothing else on the drive changes.")
         }
     }
 }

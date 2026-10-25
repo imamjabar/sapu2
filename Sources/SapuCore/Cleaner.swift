@@ -116,6 +116,8 @@ public enum Cleaner {
                 items.append(item); continue
             }
             switch f.action {
+            case .trash where f.category == .logs:
+                (item.ok, item.message) = splitLogs(f.path)
             case .trash:
                 (item.ok, item.message, item.trashedTo) = trash(f.path)
             case .freezeThenTrash:
@@ -146,7 +148,7 @@ public enum Cleaner {
         return "holds sign-ins or keys (\(c.lastComponent))."
     }
 
-    static func trash(_ path: String) -> (Bool, String, String?) {
+    public static func trash(_ path: String) -> (Bool, String, String?) {
         var result: NSURL?
         do {
             try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &result)
@@ -168,6 +170,32 @@ public enum Cleaner {
             try r.out.write(toFile: out, atomically: true, encoding: .utf8)
             return "Saved \(out.lastComponent)."
         } catch { return "Could not write \(out.lastComponent)." }
+    }
+
+    /// Logs: files untouched for a week go to the Trash; big ones still being written are emptied in place, so the app
+    /// keeps logging; small recent ones stay. The folder itself stays.
+    public static func splitLogs(_ path: String, now: Date = Date(), staleAfter: TimeInterval = 7 * 86_400,
+                                 bigActive: Int64 = 10_000_000, remove: (String) -> Bool = { trash($0).0 }) -> (Bool, String) {
+        var files: [String] = []
+        if DiskSizer.isDirectory(path) {
+            let e = FileManager.default.enumerator(atPath: path)
+            while let rel = e?.nextObject() as? String {
+                let p = path + "/" + rel
+                if DiskSizer.isSymlink(p) { e?.skipDescendants(); continue }
+                if !DiskSizer.isDirectory(p) { files.append(p) }
+            }
+        } else { files = [path] }
+        var trashed = 0, emptied = 0, kept = 0, failed = 0
+        for f in files {
+            let age = now.timeIntervalSince(DiskSizer.mtime(f) ?? now)
+            if age >= staleAfter {
+                if remove(f) { trashed += 1 } else { failed += 1 }
+            } else if DiskSizer.size(f).bytes >= bigActive {
+                if truncate(f, 0) == 0 { emptied += 1 } else { failed += 1 }
+            } else { kept += 1 }
+        }
+        return (failed == 0, "\(trashed) old log file(s) to the Trash, \(emptied) large active log(s) emptied in place, \(kept) recent kept."
+                + (failed > 0 ? " \(failed) couldn't be changed." : ""))
     }
 
     /// Empty `*.log` files in place (a file, or files up to two levels inside a folder).

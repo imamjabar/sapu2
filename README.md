@@ -32,6 +32,9 @@ Folders are measured with `getattrlistbulk(2)`, which returns sizes for a whole 
 
 **Real time estimates.** Progress is weighted by how big each location was in your last scan, so "about 12 s left" reflects bytes still to read, not a count of folders. On a first scan the estimate is labelled as rough.
 
+### Eight clear groups
+Ready to clean, Caches and Logs are grouped the way you think about them: **App cache, System cache, Diagnostic logs, Misc, Developer tools, AI tools, Browser, Trash**, each with one plain promise (for example "Browser caches. Cookies, sign-ins and history stay."). An app with several items is one row that opens (VS Code › Cache, Code Cache, WebStorage); its checkbox selects the app's safe items, and its badge shows the most careful verdict inside.
+
 ### Explains every item
 Each item shows:
 - **why it takes space**, e.g. "Duplicate Homebrew services fight for 127.0.0.1:9000; the loser restarts forever and fills `php-fpm.log`"
@@ -62,6 +65,7 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - **Found by reading the app:** helper extensions, XPC services and login items, and launch agents whose program lives inside the app.
 - **Selection:** caches, logs and background helpers are selected; your settings and data are kept unless you tick them. App groups, browser profiles, game libraries and home dot folders are never preselected.
 - **Never claimed:** shared folders, macOS apps, security agents that need their vendor's uninstaller, and namesake command-line tools (`~/.claude`, `~/.codex`, `~/.ollama`…).
+- **Several apps at once:** tick apps to remove them together, each with its default plan (caches and helpers go, your data stays).
 - **Removal:** everything goes to the Trash (Homebrew apps through `brew uninstall --cask`) and is written to a receipt.
 
 **Tested:**
@@ -114,7 +118,8 @@ Secrets are shown masked (first 8 characters and the length), each with the exac
   - the apps using the most memory and processor, with helpers counted under their app;
   - plain advice and a 0–100 score;
   - **forgotten developer processes:** dev servers, runtimes and language servers still running 12+ hours after their terminal or editor closed. Quit asks one to stop (never forced, never automatic); anything launchd runs on purpose, such as `brew services`, is left alone.
-- **Startup items:** everything in `~/Library/LaunchAgents`, on or off. **Turn off** stops it and keeps it off after restarts (`launchctl bootout` + `disable`, or `brew services stop` for Homebrew services) without deleting anything; **Turn on** brings it back. Only leftovers whose program is gone can be removed, to the Trash with a receipt. System items are shown only, and apps' own login items open in System Settings.
+- **Startup items:** everything in `~/Library/LaunchAgents`, with an on/off switch. **Off** stops it and keeps it off after restarts (`launchctl bootout` + `disable`, or `brew services stop` for Homebrew services) without deleting anything; **Turn on** brings it back. Only leftovers whose program is gone can be removed, to the Trash with a receipt. System items are shown only, and apps' own login items open in System Settings.
+- **External drives:** `.DS_Store` files go to the drive's Trash and `._` files (on drives formatted for Windows) are merged back by macOS's own `dot_clean`, after you confirm. System folders and your files stay.
 - **Maintenance:**
   - background items whose program is gone;
   - download history (macOS's list of every file you downloaded, with its web address), cleared after a copy goes to the Trash;
@@ -150,7 +155,7 @@ Sapu checks installed runtimes (PHP from Homebrew and MAMP, Node via nvm, Python
 - You always see a dry-run review first.
 - Folders go to the **Trash**, so they can be restored.
 - Caches are cleaned with the tool's own command (`npm cache clean --force`, `brew cleanup`, `conda clean --all`, `go clean -cache`…).
-- Logs are **emptied in place**, so running services keep writing.
+- Logs: files untouched for a week go to the **Trash**; big logs still being written are **emptied in place**, so running services keep writing; small recent ones stay.
 - Virtualenvs without a lockfile get a `requirements-freeze-<date>.txt` saved before they go.
 - Each cleanup writes a receipt (Markdown + JSON) listing where every item went, and **Put back** in Receipts returns any item from the Trash to where it was.
 - A final safety guard refuses home folders, `~/Library` roots, Keychains, iCloud, Mail, Messages, Photos, `~/.ssh`, `~/.aws`, `.env*`, keys and certificates, symlinks, and the files of running apps, whatever the UI allowed.
@@ -168,6 +173,7 @@ The app bundle includes `sapu-cli`, which uses the same engine and shares the sa
 /Applications/Sapu.app/Contents/Resources/sapu-cli du ~/Library       # a folder's children, biggest first
 /Applications/Sapu.app/Contents/Resources/sapu-cli startup          # startup items and their state
 /Applications/Sapu.app/Contents/Resources/sapu-cli devprocs         # forgotten developer processes
+/Applications/Sapu.app/Contents/Resources/sapu-cli external         # Mac bookkeeping files on external drives
 /Applications/Sapu.app/Contents/Resources/sapu-cli selftest
 ```
 

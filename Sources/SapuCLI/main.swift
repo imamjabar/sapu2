@@ -406,6 +406,25 @@ func selftest() -> Int32 {
     let rel = try? Updater.parse(Data(#"{"tag_name":"v0.10.0","html_url":"https://x/r","body":"n","assets":[{"name":"Sapu-macOS-arm64.dmg","browser_download_url":"https://x/a.dmg"},{"name":"Sapu-macOS-arm64.dmg.sha256","browser_download_url":"https://x/a.sha256"}]}"#.utf8))
     check(rel?.version == "0.10.0" && rel?.checksum != nil && Updater.isNewer("0.10.0", than: "0.9.2") && !Updater.isNewer("0.8.1", than: "0.8.1")
           && !Updater.isNewer("0.8.0", than: "0.8.1"), "updates: newest GitHub release read, versions compared as numbers")
+    let eh = NSTemporaryDirectory() + "sapu-drive-\(UUID().uuidString)"
+    for d in ["DCIM", ".Spotlight-V100"] { try? fm.createDirectory(atPath: eh + "/" + d, withIntermediateDirectories: true) }
+    for f in [".DS_Store", "DCIM/.DS_Store", "DCIM/a.jpg", "DCIM/._a.jpg", "DCIM/._orphan.jpg", ".Spotlight-V100/.DS_Store", "notes.txt"] {
+        fm.createFile(atPath: eh + "/" + f, contents: Data("x".utf8))
+    }
+    let ej = ExternalDrives.scan(ExternalDrives.Drive(path: eh, name: "T", format: "ExFAT", foreignFormat: true))
+    let ejApfs = ExternalDrives.scan(ExternalDrives.Drive(path: eh, name: "T", format: "APFS", foreignFormat: false))
+    check(ej.dsStore.count == 2 && ej.appleDouble.map { $0.lastComponent } == ["._a.jpg"] && ejApfs.appleDouble.isEmpty,
+          "external drives: .DS_Store found, ._ only next to its file and only on Windows-format drives, system folders skipped")
+    let lh = NSTemporaryDirectory() + "sapu-logs-\(UUID().uuidString)"
+    try? fm.createDirectory(atPath: lh, withIntermediateDirectories: true)
+    fm.createFile(atPath: lh + "/old.log", contents: Data(count: 100)); fm.createFile(atPath: lh + "/big.log", contents: Data(count: 11_000_000))
+    fm.createFile(atPath: lh + "/small.log", contents: Data(count: 100))
+    try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -10 * 86_400)], ofItemAtPath: lh + "/old.log")
+    let lr = Cleaner.splitLogs(lh, remove: { (try? fm.removeItem(atPath: $0)) != nil })
+    check(lr.0 && !fm.fileExists(atPath: lh + "/old.log") && DiskSizer.size(lh + "/big.log").bytes == 0 && fm.fileExists(atPath: lh + "/big.log")
+          && DiskSizer.size(lh + "/small.log").bytes > 0, "logs: old files to the Trash, big active ones emptied in place, small recent ones kept")
+    try? fm.removeItem(atPath: lh)
+    try? fm.removeItem(atPath: eh)
 
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
@@ -603,6 +622,15 @@ case "update-check":
         print("latest: \(r.version)  dmg: \(r.dmg.lastPathComponent)  checksum: \(r.checksum != nil ? "yes" : "no")")
         if args.contains("--download") { print("downloaded and verified: \(try await Updater.download(r).path)") }
     } catch { print("error: \(error.localizedDescription)") }
+case "external":
+    // sapu-cli external [--clean]   Mac bookkeeping files on external drives (--clean: .DS_Store to the drive's Trash, ._ merged by dot_clean)
+    let drives = ExternalDrives.drives()
+    if drives.isEmpty { print("No writable external drive.") }
+    for d in drives {
+        let j = ExternalDrives.scan(d)
+        print("\(d.name) (\(d.format)): \(j.dsStore.count) .DS_Store, \(j.appleDouble.count) ._ files, \(Format.bytes(j.bytes))")
+        if args.contains("--clean"), j.count > 0 { print("  " + ExternalDrives.clean(d, j).message) }
+    }
 case "startup":
     // sapu-cli startup   startup items and their state (read-only)
     for i in Startup.list() {
@@ -844,5 +872,5 @@ case "maintenance":
         if case .terminal(let c) = t.fix { print("    $ \(c)") }
     }
 default:
-    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | du [path] [--top n] | startup | devprocs [hours] | selftest")
+    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | du [path] [--top n] | startup | devprocs [hours] | external [--clean] | selftest")
 }

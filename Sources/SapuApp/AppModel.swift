@@ -355,6 +355,54 @@ final class AppModel: ObservableObject {
         plan = p
     }
 
+    // MARK: Several apps at once
+
+    @Published var batch = Set<String>()
+    @Published var batchPlans: [UninstallPlan] = []
+    @Published var planningBatch = false
+
+    func toggleBatch(_ app: InstalledApp) {
+        if batch.contains(app.id) { batch.remove(app.id) } else { batch.insert(app.id) }
+        planBatch()
+    }
+
+    /// Each ticked app with its default plan: the app, caches and helpers go; your data and locked items stay.
+    func planBatch() {
+        let picked = installedApps.filter { batch.contains($0.id) }
+        guard picked.count > 1 else { batchPlans = []; return }
+        planningBatch = true
+        let apps = installedApps
+        Task.detached(priority: .userInitiated) {
+            let running = SystemProbe.runningProcessNames()
+            let plans = picked.map { Uninstaller.plan(for: $0, running: running, apps: apps) }
+            await MainActor.run {
+                // Only if the ticks didn't change meanwhile.
+                if Set(plans.map(\.app.id)) == self.batch { self.batchPlans = plans }
+                self.planningBatch = false
+            }
+        }
+    }
+
+    func uninstallBatch() {
+        let plans = batchPlans.filter { $0.blocked == nil }
+        guard !plans.isEmpty else { return }
+        uninstalling = true
+        Task {
+            for p in plans {
+                let receipt = await Uninstaller.uninstall(p, running: SystemProbe.runningProcessNames())
+                if receipt.items.first(where: { $0.path == p.app.path })?.ok == true {
+                    installedApps.removeAll { $0.id == p.app.id }
+                    batch.remove(p.app.id)
+                }
+                lastReceipt = receipt
+            }
+            receipts = Store.receipts()
+            uninstalling = false
+            batchPlans = []
+            planBatch()
+        }
+    }
+
     func uninstall() {
         guard let p = plan else { return }
         uninstalling = true
@@ -484,6 +532,28 @@ final class AppModel: ObservableObject {
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
         panel.prompt = "Never clean"
         if panel.runModal() == .OK { for u in panel.urls { setProtected(u.path, true) } }
+    }
+
+    // MARK: External drives
+
+    @Published var drives: [(drive: ExternalDrives.Drive, junk: ExternalDrives.Junk)] = []
+    @Published var driveResults: [String: String] = [:]
+    @Published var driveBusy: String?
+
+    func loadDrives() {
+        Task.detached(priority: .utility) {
+            let found = ExternalDrives.drives().map { ($0, ExternalDrives.scan($0)) }
+            await MainActor.run { self.drives = found }
+        }
+    }
+
+    func cleanDrive(_ d: ExternalDrives.Drive, _ j: ExternalDrives.Junk) {
+        driveBusy = d.id
+        Task.detached(priority: .userInitiated) {
+            let r = ExternalDrives.clean(d, j)
+            let found = ExternalDrives.drives().map { ($0, ExternalDrives.scan($0)) }
+            await MainActor.run { self.driveResults[d.id] = r.message; self.drives = found; self.driveBusy = nil; self.receipts = Store.receipts() }
+        }
     }
 
     // MARK: Startup items
