@@ -348,13 +348,18 @@ func selftest() -> Int32 {
     fm.createFile(atPath: vh + "/.claude/projects/-here/a.jsonl", contents: Data(#"{"cwd":"\#(vh)/proj"}"#.utf8))
     fm.createFile(atPath: vh + "/.claude/projects/-nochats/memory.md", contents: Data("m".utf8))
     let chats = DevExtras.orphanedClaudeChats(home: vh)
-    check(chats.count == 1 && chats[0].path.hasSuffix("-gone") && chats[0].safety == .check && chats[0].title.contains("oldproject"),
-          "ai: Claude Code chats listed only when their project folder is gone; never preselected")
+    check(chats.count == 1 && chats[0].path.hasSuffix("-gone") && chats[0].safety == .yours && chats[0].action == CleanAction.none
+          && chats[0].title.contains("oldproject"),
+          "ai: Claude Code chats of a deleted project are shown, never cleaned (chat history is yours)")
     fm.createFile(atPath: vh + "/.ollama/models/manifests/registry.ollama.ai/library/llama3/8b",
                   contents: Data(#"{"config":{"size":500},"layers":[{"size":4000000000},{"size":12000}]}"#.utf8))
     let om = DevExtras.ollamaModels(home: vh)
-    check(om.count == 1 && om[0].title == "Ollama model llama3:8b" && om[0].bytes == 4_000_012_500 && om[0].safety == .yours,
-          "ai: Ollama models sized by their layers, never preselected")
+    check(om.count == 1 && om[0].title == "Ollama model llama3:8b" && om[0].bytes == 4_000_012_500 && om[0].action == CleanAction.none,
+          "ai: Ollama models sized by their layers, shown, never cleaned")
+    check(RuleBook.all.filter { $0.category == .ml || ["docker.desktop", "colima"].contains($0.id) }.allSatisfy { r in
+              r.action == CleanAction.none || !(r.paths.contains { $0.contains("huggingface") || $0.contains("torch") || $0.contains("ollama") || $0.contains("lmstudio") })
+          } && RuleBook.all.first { $0.id == "colima" }?.action == CleanAction.none && RuleBook.all.first { $0.id == "hf.cache" }?.action == CleanAction.none,
+          "safety: models and Docker disks are shown with how to manage them, never cleaned by Sapu")
 
     check(DiskExplorer.trashRefusal(vh + "/keys/.ssh", projects: [], home: vh) != nil
           && DiskExplorer.trashRefusal(vh + "/.Trash", projects: [], home: vh) != nil

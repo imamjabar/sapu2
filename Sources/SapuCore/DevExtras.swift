@@ -92,11 +92,12 @@ public enum DevExtras {
         var out: [Candidate] = []
         for dir in DiskSizer.children(root, includeHidden: false) where DiskSizer.isDirectory(dir) && !DiskSizer.isSymlink(dir) {
             guard let cwd = chatProject(dir), cwd.hasPrefix("/"), !cwd.hasPrefix("/Volumes/"), !FileManager.default.fileExists(atPath: cwd) else { continue }
-            out.append(Candidate(path: dir, title: "Claude Code chats: \(cwd.lastComponent) (folder gone)", category: .devCaches, safety: .check,
+            // Chat history is yours: shown with its size, never cleaned by Sapu.
+            out.append(Candidate(path: dir, title: "Claude Code chats: \(cwd.lastComponent) (folder gone)", category: .devCaches, safety: .yours,
                                  reason: "Chats from a project folder that no longer exists (\(cwd.tildePath)). Claude Code resumes chats by folder, so these can't be picked up from there any more.",
                                  usedFor: "Reading or resuming those old chats.", owner: "Claude Code",
-                                 rebuild: "Not rebuilt: these are your chat history. Keep them if you moved the project and still want them.",
-                                 action: .trash))
+                                 rebuild: "Sapu never removes chat history. If you're sure you don't need these chats, delete the folder in Finder.",
+                                 action: .none))
         }
         return out
     }
@@ -115,13 +116,11 @@ public enum DevExtras {
         return nil
     }
 
-    /// Each local Ollama model, sized by its layer files. Removed with `ollama rm`, which keeps layers other models share.
+    /// Each local Ollama model, sized by its layer files. Models are yours: shown, never removed by Sapu.
     public static func ollamaModels(home: String) -> [Candidate] {
         let root = home + "/.ollama/models"
         let manifests = root + "/manifests"
         var out: [Candidate] = []
-        let ollama = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"]
-            .first(where: FileManager.default.isExecutableFile)
         for host in DiskSizer.children(manifests, includeHidden: false) {
             for ns in DiskSizer.children(host, includeHidden: false) {
                 for model in DiskSizer.children(ns, includeHidden: false) {
@@ -135,8 +134,8 @@ public enum DevExtras {
                             + model.lastComponent + ":" + tag.lastComponent
                         out.append(Candidate(path: tag, title: "Ollama model \(name)", category: .ml, safety: .yours,
                                              reason: "A local language model you pulled with Ollama.", usedFor: "Running \(name) offline.", owner: "Ollama",
-                                             rebuild: "Pull it again with `ollama pull \(name)` if you need it later.",
-                                             action: ollama == nil ? .none : .command("\(ollama!) rm \(name)"), whileRunning: [], bytes: bytes))
+                                             rebuild: "Sapu doesn't remove models. If you no longer use it, run `ollama rm \(name)`; layers other models share stay.",
+                                             action: .none, whileRunning: [], bytes: bytes))
                     }
                 }
             }

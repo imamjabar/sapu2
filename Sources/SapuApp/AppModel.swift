@@ -113,15 +113,12 @@ final class AppModel: ObservableObject {
     }
 
     /// First launch runs the two light layers; later launches show cached results instantly.
+    /// Full Disk Access is never pushed at launch: the banner only informs. Sapu asks once per session, when you start a scan.
     func onLaunch() {
-        if !hasFullDiskAccess && !UserDefaults.standard.bool(forKey: "accessSetupDismissed") {
-            showAccessSetup = true
-            watchFullDiskAccess()
-        }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.recheckFullDiskAccess() }
         }
-        if snapshot.layerDates.isEmpty { scan([.quick, .projects]) }
+        if snapshot.layerDates.isEmpty { scan([.quick, .projects], userInitiated: false) }
         refreshHealth()
         checkMaintenance()
         Task { await refreshVersions(network: false) }
@@ -129,7 +126,15 @@ final class AppModel: ObservableObject {
 
     // MARK: Scanning
 
-    func scan(_ layers: [ScanLayer]) {
+    private var askedForAccess = false
+
+    func scan(_ layers: [ScanLayer], userInitiated: Bool = true) {
+        // The scan runs either way; without access some app containers just can't be measured.
+        if userInitiated, !hasFullDiskAccess, !askedForAccess, !UserDefaults.standard.bool(forKey: "accessSetupDismissed") {
+            askedForAccess = true
+            showAccessSetup = true
+            watchFullDiskAccess()
+        }
         guard scanning == nil else { queue.append(contentsOf: layers.filter { !queue.contains($0) }); return }
         queue = layers
         Task { await runQueue() }

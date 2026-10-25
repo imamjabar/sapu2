@@ -80,8 +80,9 @@ Pick an app and Sapu lists the app plus everything it keeps in your Library befo
 - **Older simulator runtimes:** with Xcode installed, every iOS/watchOS/tvOS/visionOS simulator runtime except the newest per platform, removed with `xcrun simctl runtime delete`. Without Xcode, leftover images are only shown.
 - **Old pnpm store layouts:** `store/v3` left behind after pnpm 10 moved to `store/v10`. Never preselected (a project may still pin an older pnpm); the current store is pruned with `pnpm store prune`.
 - **Instruments recordings:** `.trace` bundles inside your projects. Recordings from the last week are locked.
-- **Claude Code chats of deleted projects:** chat folders whose project folder no longer exists (read from the chats themselves). Never preselected: they're your history.
-- **Ollama models:** each model sized by its layers, removed with `ollama rm` so layers shared with other models stay. Never preselected.
+- **Claude Code chats of deleted projects:** chat folders whose project folder no longer exists (read from the chats themselves). Shown only: chat history is yours.
+- **Models are never cleaned:** Ollama (each model sized by its layers), Hugging Face and PyTorch models are shown with how to remove them in their own tool.
+- **Docker Desktop and Colima disks are shown only:** `docker system prune` keeps volumes but deletes stopped containers and files inside them, so it's yours to run.
 - **Manage in their own app:** OrbStack's disk, Claude's virtual machine, LM Studio, Draw Things and ComfyUI models, and macOS aerial wallpaper videos are listed so the space is explained, but only their own app removes them.
 - **Clang module cache:** precompiled modules from Xcode and swiftc in your account's macOS cache folder (`/var/folders/…/C/clang/ModuleCache`). It's outside your home folder, so Sapu shows its size and how to remove it but never cleans it.
 
