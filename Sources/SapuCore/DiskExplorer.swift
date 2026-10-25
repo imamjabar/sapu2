@@ -53,6 +53,7 @@ public enum DiskExplorer {
         let p = (path as NSString).standardizingPath
         guard p.hasPrefix(home + "/") else { return "Outside your home folder." }
         if p == home + "/.Trash" || p.hasPrefix(home + "/.Trash/") { return "Already in the Trash." }
+        if ProtectList.entry(covering: p, in: ProtectList.load()) != nil { return ProtectList.message }
         var q = p
         while q.count > home.count {
             if let s = sealed(q, home: home) { return q == p ? s : "Inside a private folder. " + s }

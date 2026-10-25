@@ -145,6 +145,8 @@ Sapu checks installed runtimes (PHP from Homebrew and MAMP, Node via nvm, Python
 - A per-project **dependency audit** runs `npm audit` or `composer audit` on demand.
 
 ### Cleans safely, with receipts
+- **Protect list:** right-click any item and choose **Never clean this** (or add folders in Protect list). Everything inside stays, in every scan, the disk map and uninstalls, and the final guard refuses it too.
+- **Careful by default:** cross-checked against a reference cleaner's own protection rules. macOS's own caches, Codex data and runtimes, and leftovers of virtual-machine and mail apps are shown only; IDE, Office and AI app caches are never preselected.
 - You always see a dry-run review first.
 - Folders go to the **Trash**, so they can be restored.
 - Caches are cleaned with the tool's own command (`npm cache clean --force`, `brew cleanup`, `conda clean --all`, `go clean -cache`…).

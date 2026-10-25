@@ -15,6 +15,11 @@ struct SapuApp: App {
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified)
         .commands {
+            if Updater.enabled {
+                CommandGroup(after: .appInfo) {
+                    Button("Check for Updates…") { model.checkForUpdates(manual: true) }
+                }
+            }
             CommandMenu("Scan") {
                 Button("Quick scan") { model.scan([.quick]) }.keyboardShortcut("r")
                 Button("Scan projects") { model.scan([.projects]) }.keyboardShortcut("p", modifiers: [.command, .shift])

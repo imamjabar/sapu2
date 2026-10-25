@@ -227,3 +227,35 @@ struct ReceiptsView: View {
         }
     }
 }
+
+/// Folders and files Sapu must never clean. Add from here, or with "Never clean this" on any item.
+struct ProtectListView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneHeader(pane: .protected, value: model.protectList.isEmpty ? nil : "\(model.protectList.count)", caption: "protected") {
+                Button("Add…") { model.addProtectedFromPanel() }
+            }
+            if model.protectList.isEmpty {
+                EmptyState(symbol: "lock.shield", title: "Nothing on your protect list",
+                           message: "Right-click any item and choose Never clean this, or add a folder here. Everything inside it stays, in every scan, the disk map and uninstalls.",
+                           action: ("Add a folder…", { model.addProtectedFromPanel() }))
+            } else {
+                List(model.protectList, id: \.self) { p in
+                    HStack {
+                        Image(systemName: "lock.fill").foregroundStyle(Pane.protected.tint)
+                        VStack(alignment: .leading) {
+                            Text(p.lastComponent)
+                            Text(p.tildePath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        if !FileManager.default.fileExists(atPath: p) { Text("Not on disk").font(.caption).foregroundStyle(.secondary) }
+                        Button("Remove") { model.setProtected(p, false) }.help("Sapu may clean it again")
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+    }
+}

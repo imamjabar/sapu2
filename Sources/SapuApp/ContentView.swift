@@ -11,7 +11,8 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 if !model.hasFullDiskAccess { FullDiskAccessBanner() }
-                if ![.overview, .uninstall, .health, .maintenance, .map].contains(model.section) || model.scanning != nil {
+                if (model.update != nil && !model.updateDismissed) || model.updateStatus != nil { UpdateBanner() }
+                if ![.overview, .uninstall, .health, .maintenance, .map, .protected].contains(model.section) || model.scanning != nil {
                     ScanBar()
                     Divider()
                 }
@@ -64,6 +65,7 @@ struct ContentView: View {
         case .health: HealthView()
         case .maintenance: MaintenanceView()
         case .receipts: ReceiptsView()
+        case .protected: ProtectListView()
         case .map: DiskMapView(ex: model.explorer)
         default: FindingsList(section: model.section)
         }
@@ -100,6 +102,8 @@ struct Sidebar: View {
     @ViewBuilder private func badge(_ s: Pane) -> some View {
         switch s {
         case .overview, .receipts, .map, .uninstall: EmptyView()
+        case .protected:
+            if !model.protectList.isEmpty { Text("\(model.protectList.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
         case .health:
             if let h = model.health {
                 Text("\(h.score)").font(.caption.weight(.semibold).monospacedDigit())
@@ -175,5 +179,28 @@ struct InspectorPlaceholder: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A quiet note when a newer release is on GitHub, or the result of a manual check.
+struct UpdateBanner: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle").foregroundStyle(.blue)
+            if let r = model.update, !model.updateDismissed {
+                Text(model.updateStatus ?? "Sapu \(r.version) is available (you have \(Updater.current)).").font(.callout)
+                Spacer()
+                Button("Release notes") { NSWorkspace.shared.open(r.page) }.buttonStyle(.link)
+                Button("Download") { model.downloadUpdate() }
+                Button { model.updateDismissed = true; model.updateStatus = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
+            } else if let s = model.updateStatus {
+                Text(s).font(.callout)
+                Spacer()
+                Button { model.updateStatus = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(.blue.opacity(0.08))
     }
 }
