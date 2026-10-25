@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Package
-        # CI has no reference: check the saved recording. The live reference rerun happens before tagging (scripts/release-check.sh).
+        # CI has no reference tool: check the saved recording. The live reference rerun happens before tagging (scripts/release-check.sh).
         env:
           SAPU_REPLAY_ONLY: "1"
         run: scripts/package.sh "${GITHUB_REF_NAME#v}"

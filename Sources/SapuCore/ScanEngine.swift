@@ -362,6 +362,7 @@ public final class ScanEngine: @unchecked Sendable {
             ("Google/Chrome", "Chrome", "Google Chrome"), ("Arc/User Data", "Arc", "Arc"),
             ("BraveSoftware/Brave-Browser", "Brave", "Brave Browser"), ("Microsoft Edge", "Edge", "Microsoft Edge"),
             ("Vivaldi", "Vivaldi", "Vivaldi"), ("com.operasoftware.Opera", "Opera", "Opera"),
+            ("net.imput.helium", "Helium", "Helium"), ("Dia/User Data", "Dia", "Dia"),
         ]
         let shared = ["GrShaderCache", "ShaderCache", "GraphiteDawnCache", "GPUPersistentCache", "component_crx_cache",
                       "extensions_crx_cache", "optimization_guide_model_store", "Crashpad/completed"]
@@ -505,6 +506,7 @@ public final class ScanEngine: @unchecked Sendable {
         // Covered by the Electron and browser rules, or holding data that only looks like a cache.
         let skip: Set<String> = ["Code", "Cursor", "Slack", "discord", "Microsoft Teams", "Notion", "Antigravity", "Claude",
                                  "Windsurf", "Google", "Arc", "BraveSoftware", "Microsoft Edge", "Vivaldi", "com.operasoftware.Opera",
+                                 "net.imput.helium", "Dia", "company.thebrowser.Browser",
                                  "MobileSync", "Sapu", "CloudDocs", "Knowledge", "AddressBook", "CallHistoryDB", "com.apple.TCC",
                                  "1Password", "Bitwarden", "Dashlane", "Keeper", "pyinstaller", "JetBrains"]
         var jobs: [Job] = []
@@ -512,7 +514,7 @@ public final class ScanEngine: @unchecked Sendable {
             let name = app.lastComponent
             if name.hasPrefix("com.apple.") { continue }
             // Electron apps keep Chromium caches per profile (Notion's Partitions, Codex's Default) as well as at the top.
-            var subs = ["Cache", "Caches", "Code Cache", "GPUCache", "logs", "Logs"].map { (app + "/" + $0, $0) }
+            var subs = ["Cache", "Caches", "Code Cache", "GPUCache", "blob_storage", "logs", "Logs"].map { (app + "/" + $0, $0) }
             for root in Self.chromiumProfiles(app) {
                 for c in Self.chromiumCacheDirs + Self.chromiumSharedCaches where root != app || !["Cache", "Code Cache", "GPUCache"].contains(c) {
                     subs.append((root + "/" + c, String((root + "/" + c).dropFirst(app.count + 1))))
@@ -553,6 +555,7 @@ public final class ScanEngine: @unchecked Sendable {
             "gpupersistentcache": "graphics cache", "dawncache": "graphics cache", "component_crx_cache": "component downloads",
             "extensions_crx_cache": "extension downloads", "completed": "crash reports", "cacheddata": "compiled code cache",
             "cachedextensionvsixs": "extension downloads", "webstorage": "webview storage", "caches": "cache", "logs": "logs",
+            "blob_storage": "temporary web files",
         ]
         let parts = sub.split(separator: "/").map(String.init)
         let base = names[parts.last?.lowercased() ?? ""] ?? sub
