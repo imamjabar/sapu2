@@ -217,7 +217,8 @@ public final class ScanEngine: @unchecked Sendable {
             }
             group.notify(queue: .global(qos: .utility)) { cont.resume() }
         }
-        return results.value.sorted { $0.key < $1.key }.map(\.value)
+        let protected = ProtectList.load()
+        return results.value.sorted { $0.key < $1.key }.map { ProtectList.apply(Protection.adjust($0.value), list: protected) }
     }
 
     // MARK: Layer 1 — quick

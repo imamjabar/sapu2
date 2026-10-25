@@ -51,6 +51,8 @@ public enum SafetyGuard {
         if let lock = f.lockedReason, !(allowActiveProjects && lock.hasPrefix("Active project")) { return lock }
         guard allowedRoots.contains(where: p.hasPrefix) else { return "Outside the folders Sapu may change." }
         if protectedFragments.contains(where: p.contains) { return "Protected location." }
+        if let why = Protection.dataOnly(p) { return why }
+        if ProtectList.entry(covering: p, in: ProtectList.load()) != nil { return ProtectList.message }
         // One app's cookie file goes with that app; the Cookies folder and Apple's own stay.
         if p.contains("/Library/Cookies"), !(p.parentPath == home + "/Library/Cookies" && p.hasSuffix(".binarycookies")
                                               && !p.lastComponent.hasPrefix("com.apple.")) { return "Protected location." }

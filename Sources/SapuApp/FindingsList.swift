@@ -116,6 +116,12 @@ struct FindingRow: View {
         .contextMenu {
             Button("Reveal in Finder") { model.reveal(finding.path) }
             Button("Copy path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(finding.path, forType: .string) }
+            Divider()
+            if model.isProtected(finding.path) {
+                Button("Allow cleaning again") { model.setProtected(ProtectList.entry(covering: finding.path, in: model.protectList) ?? finding.path, false) }
+            } else {
+                Button("Never clean this") { model.setProtected(finding.path, true) }
+            }
         }
     }
 }

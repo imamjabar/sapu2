@@ -384,6 +384,29 @@ func selftest() -> Int32 {
           "processes: forgotten dev servers and lone language servers found; launchd jobs, databases and live ones left alone")
     try? fm.removeItem(atPath: vh)
 
+    // Protection policy, from the reference cleaner's own protection check on this Mac's findings.
+    let ph = "/Users/x", pl = ph + "/Library"
+    func adj(_ p: String, _ s: Safety = .safe) -> Finding {
+        Protection.adjust(Finding(path: p, title: "t", category: .appCaches, safety: s, reason: "", usedFor: "", action: .trash, layer: .quick), home: ph)
+    }
+    check([pl + "/Caches/com.apple.akd", pl + "/Containers/com.apple.mediaanalysisd/Data/Library/Caches", pl + "/Application Support/Codex/Default/GPUCache",
+           ph + "/.cache/codex-runtimes", pl + "/Caches/Codex", pl + "/Containers/com.utmapp.UTM", pl + "/Containers/com.microsoft.Outlook"]
+            .allSatisfy { adj($0).action == CleanAction.none && adj($0).safety == .yours },
+          "protection: Apple caches, Codex data, VM and mail leftovers are shown only")
+    check(adj(pl + "/Caches/Codex/Default/Cache").action == CleanAction.trash
+          && [pl + "/Caches/com.microsoft.VSCode", pl + "/Containers/com.microsoft.Excel/Data/Library/Logs", pl + "/Caches/com.openai.codex"]
+            .allSatisfy { adj($0).safety == .check } && adj(pl + "/Caches/com.spotify.client").safety == .safe,
+          "protection: IDE, Office and AI app caches never preselected; Codex's web cache and other apps' caches unchanged")
+    let plist = [ph + "/Work", pl + "/Caches/com.spotify.client"]
+    let locked = ProtectList.apply(adj(ph + "/Work/app/node_modules"), list: plist)
+    check(ProtectList.entry(covering: ph + "/Work/app", in: plist) == ph + "/Work" && ProtectList.entry(covering: ph + "/Workshop", in: plist) == nil
+          && locked.lockedReason == ProtectList.message && !locked.isCleanable
+          && ProtectList.apply(locked, list: []).lockedReason == nil,
+          "protect list: everything under an entry is locked, neighbours aren't, removing it unlocks")
+    let rel = try? Updater.parse(Data(#"{"tag_name":"v0.10.0","html_url":"https://x/r","body":"n","assets":[{"name":"Sapu-macOS-arm64.dmg","browser_download_url":"https://x/a.dmg"},{"name":"Sapu-macOS-arm64.dmg.sha256","browser_download_url":"https://x/a.sha256"}]}"#.utf8))
+    check(rel?.version == "0.10.0" && rel?.checksum != nil && Updater.isNewer("0.10.0", than: "0.9.2") && !Updater.isNewer("0.8.1", than: "0.8.1")
+          && !Updater.isNewer("0.8.0", than: "0.8.1"), "updates: newest GitHub release read, versions compared as numbers")
+
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
           "scan: cache titles read plainly, without profile IDs")
@@ -573,6 +596,13 @@ case "devprocs":
     let found = DevProcesses.find(minAge: hours * 3600)
     if found.isEmpty { print("No forgotten developer processes (\(Int(hours))+ hours).") }
     for p in found { print("\(p.pid)  \(Format.bytes(p.memory).padding(toLength: 9, withPad: " ", startingAt: 0)) \(p.name): \(p.reason)\n      \(p.command.prefix(140))") }
+case "update-check":
+    // sapu-cli update-check [--download]   latest GitHub release; --download fetches and verifies the DMG
+    do {
+        let r = try await Updater.latest()
+        print("latest: \(r.version)  dmg: \(r.dmg.lastPathComponent)  checksum: \(r.checksum != nil ? "yes" : "no")")
+        if args.contains("--download") { print("downloaded and verified: \(try await Updater.download(r).path)") }
+    } catch { print("error: \(error.localizedDescription)") }
 case "startup":
     // sapu-cli startup   startup items and their state (read-only)
     for i in Startup.list() {

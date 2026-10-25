@@ -19,6 +19,7 @@ extension Pane {
         case .maintenance: .cyan
         case .security: .red
         case .receipts: .gray
+        case .protected: .indigo
         }
     }
 
@@ -40,6 +41,7 @@ extension Pane {
         case .maintenance: "Small fixes macOS doesn't do by itself: broken login items, damaged settings, stale caches."
         case .security: "Runtimes and project versions checked for end-of-life and missing CVE fixes."
         case .receipts: "Every cleanup, and where each item went so you can put it back."
+        case .protected: "Folders and files Sapu must never clean, whatever a scan finds."
         }
     }
 
@@ -49,11 +51,11 @@ extension Pane {
         ("Free up space", [.apps, .uninstall, .files]),
         ("Understand", [.projects, .map]),
         ("Keep it healthy", [.health, .maintenance, .security]),
-        ("History", [.receipts]),
+        ("History", [.receipts, .protected]),
     ]
 
     /// Panes whose rows open the details inspector.
-    var showsInspector: Bool { ![.projects, .security, .receipts, .uninstall, .health, .maintenance].contains(self) }
+    var showsInspector: Bool { ![.projects, .security, .receipts, .protected, .uninstall, .health, .maintenance].contains(self) }
 }
 
 /// Rounded, gradient-filled icon square, the visual anchor of every section.

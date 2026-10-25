@@ -194,6 +194,11 @@ struct DiskMapView: View {
             NSPasteboard.general.setString(p, forType: .string)
         }
         Divider()
+        if model.isProtected(p) {
+            Button("Allow cleaning again") { model.setProtected(ProtectList.entry(covering: p, in: model.protectList) ?? p, false) }
+        } else {
+            Button("Never clean this") { model.setProtected(p, true) }
+        }
         Button("Move to Trash…", role: .destructive) { askTrash(p, bytes) }
     }
 

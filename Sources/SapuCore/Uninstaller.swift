@@ -183,7 +183,7 @@ public enum Uninstaller {
                 return UninstallItem(path: path, kind: kind, bytes: 0, selected: i == 0 || (!hold && (kind == .cache || kind == .agent)),
                                      holdBack: hold, note: i == 0 ? appNote(app) : note(for: path, kind: kind, hold: hold, earlier: old))
             }
-            var p = UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
+            var p = UninstallPlan(app: app, items: protect(items), blocked: blockReason(app, running: running))
             p.sized = false
             return p
         }
@@ -238,7 +238,17 @@ public enum Uninstaller {
                                            note: "Cache inside \(path.lastComponent). Rebuilt by the app; the rest of that folder stays unless you choose it."))
             }
         }
-        return UninstallPlan(app: app, items: items, blocked: blockReason(app, running: running))
+        return UninstallPlan(app: app, items: protect(items), blocked: blockReason(app, running: running))
+    }
+
+    /// Items on your protect list stay: never selected, never removed.
+    static func protect(_ items: [UninstallItem]) -> [UninstallItem] {
+        let list = ProtectList.load()
+        guard !list.isEmpty else { return items }
+        return items.map { i in
+            guard ProtectList.entry(covering: i.path, in: list) != nil else { return i }
+            var j = i; j.selected = false; j.locked = ProtectList.message; return j
+        }
     }
 
     static func appNote(_ app: InstalledApp) -> String {
@@ -800,7 +810,9 @@ public enum Uninstaller {
             items.append(.init(path: plan.app.path, title: plan.app.name, bytes: 0, action: "Uninstall", ok: false, message: "Skipped: \(why)", trashedTo: nil))
             return CleanReceipt(date: Date(), items: items, freeBefore: before, freeAfter: before)
         }
-        for item in plan.items where item.selected {
+        let protectedList = ProtectList.load()
+        // Checked again right before removing: locked items and your protect list always stay.
+        for item in plan.items where item.selected && item.locked == nil && ProtectList.entry(covering: item.path, in: protectedList) == nil {
             var r = CleanReceipt.Item(path: item.path, title: item.kind == .app ? plan.app.name : item.path.tildePath, bytes: item.bytes,
                                       action: item.kind == .app ? "Uninstall app" : "Move to Trash", ok: false, message: "", trashedTo: nil)
             if item.kind == .app {

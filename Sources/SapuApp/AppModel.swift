@@ -17,6 +17,7 @@ enum Pane: String, Hashable, CaseIterable, Identifiable {
     case maintenance = "Maintenance"
     case security = "Security & versions"
     case receipts = "Receipts"
+    case protected = "Protect list"
 
     var id: String { rawValue }
 
@@ -36,6 +37,7 @@ enum Pane: String, Hashable, CaseIterable, Identifiable {
         case .maintenance: "wrench.and.screwdriver"
         case .security: "shield.lefthalf.filled"
         case .receipts: "list.bullet.clipboard"
+        case .protected: "lock.shield"
         }
     }
 
@@ -121,6 +123,7 @@ final class AppModel: ObservableObject {
         if snapshot.layerDates.isEmpty { scan([.quick, .projects], userInitiated: false) }
         refreshHealth()
         checkMaintenance()
+        if Updater.enabled { checkForUpdates(manual: false) }
         Task { await refreshVersions(network: false) }
     }
 
@@ -422,6 +425,65 @@ final class AppModel: ObservableObject {
             let fresh = DevProcesses.find()
             await MainActor.run { self.devProcessResults[p.pid] = r.message; self.devProcesses = fresh }
         }
+    }
+
+    // MARK: Updates
+
+    @Published var update: Updater.Release?
+    @Published var updateStatus: String?
+    @Published var updateDismissed = false
+
+    /// Once a day on its own (quiet unless there is a newer release), or whenever you ask.
+    func checkForUpdates(manual: Bool) {
+        let last = UserDefaults.standard.object(forKey: "lastUpdateCheck") as? Date ?? .distantPast
+        guard manual || Date().timeIntervalSince(last) > 86_400 else { return }
+        if manual { updateStatus = "Checking for updates…"; updateDismissed = false }
+        Task {
+            do {
+                let r = try await Updater.latest()
+                UserDefaults.standard.set(Date(), forKey: "lastUpdateCheck")
+                if Updater.isNewer(r.version, than: Updater.current) { update = r; updateStatus = nil }
+                else if manual { updateStatus = "Sapu \(Updater.current) is the latest version." }
+            } catch {
+                if manual { updateStatus = "Couldn't check for updates: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    func downloadUpdate() {
+        guard let r = update else { return }
+        updateStatus = "Downloading Sapu \(r.version)…"
+        Task {
+            do {
+                let dmg = try await Updater.download(r)
+                updateStatus = "Downloaded and verified. Drag Sapu onto Applications in the window that opened, then reopen Sapu."
+                NSWorkspace.shared.open(dmg)
+            } catch {
+                updateStatus = "Download failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: Protect list
+
+    @Published var protectList: [String] = ProtectList.load()
+
+    func isProtected(_ path: String) -> Bool { ProtectList.entry(covering: path, in: protectList) != nil }
+
+    func setProtected(_ path: String, _ on: Bool) {
+        on ? ProtectList.add(path) : ProtectList.remove(path)
+        protectList = ProtectList.load()
+        snapshot.findings = snapshot.findings.map { ProtectList.apply($0, list: protectList) }
+        checked = checked.filter { id in !isProtected(id) }
+        Store.save(snapshot)
+    }
+
+    func addProtectedFromPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = true
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        panel.prompt = "Never clean"
+        if panel.runModal() == .OK { for u in panel.urls { setProtected(u.path, true) } }
     }
 
     // MARK: Startup items
