@@ -11,6 +11,13 @@ public struct CleanReceipt: Codable, Sendable, Identifiable {
         public var message: String
         /// Where the item went in the Trash, for restoring.
         public var trashedTo: String?
+        /// Put back from the Trash to where it was.
+        public var restored: Bool? = nil
+
+        public init(path: String, title: String, bytes: Int64, action: String, ok: Bool, message: String, trashedTo: String?, restored: Bool? = nil) {
+            self.path = path; self.title = title; self.bytes = bytes; self.action = action; self.ok = ok; self.message = message
+            self.trashedTo = trashedTo; self.restored = restored
+        }
     }
     public var id: String { date.ISO8601Format() }
     public var date: Date
@@ -54,6 +61,37 @@ public enum SafetyGuard {
         if DiskSizer.isSymlink(p) { return "Symlink; Sapu never follows or removes links." }
         if !DiskSizer.exists(p) { return "Already gone." }
         return nil
+    }
+}
+
+/// Puts a cleaned item back where it was, from the Trash.
+public enum Restorer {
+    /// Moves `trashedTo` back to `path`. Refuses when the item has left the Trash or something new is at its old place.
+    public static func putBack(_ item: CleanReceipt.Item, home: String = NSHomeDirectory()) -> (ok: Bool, message: String) {
+        guard let from = item.trashedTo, item.ok else { return (false, "This item didn't go to the Trash.") }
+        guard item.restored != true else { return (false, "Already put back.") }
+        guard from.hasPrefix(home + "/.Trash/") || from.contains("/.Trashes/") else { return (false, "Not in the Trash.") }
+        guard DiskSizer.exists(from) else { return (false, "No longer in the Trash (it was emptied or moved).") }
+        guard !DiskSizer.exists(item.path) else { return (false, "Something is already at \(item.path.tildePath). Put it back by hand from the Trash.") }
+        do {
+            try FileManager.default.createDirectory(atPath: item.path.parentPath, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(atPath: from, toPath: item.path)
+            return (true, "Put back to \(item.path.tildePath).")
+        } catch {
+            return (false, "Couldn't put it back: \(error.localizedDescription)")
+        }
+    }
+
+    /// Puts one receipt item back and records it in the receipt.
+    public static func putBack(_ receipt: CleanReceipt, item index: Int) -> (receipt: CleanReceipt, ok: Bool, message: String) {
+        guard receipt.items.indices.contains(index) else { return (receipt, false, "No such item.") }
+        let r = putBack(receipt.items[index])
+        var updated = receipt
+        if r.ok {
+            updated.items[index].restored = true
+            Cleaner.save(updated)
+        }
+        return (updated, r.ok, r.message)
     }
 }
 
@@ -152,7 +190,7 @@ public enum Cleaner {
         return n.hasSuffix(".log") || n.contains(".log.") || n.hasSuffix("_log") || n.hasSuffix(".err")
     }
 
-    static func save(_ r: CleanReceipt) {
+    public static func save(_ r: CleanReceipt) {
         let dir = Store.receiptsDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = r.date.ISO8601Format().replacingOccurrences(of: ":", with: "-")
@@ -162,7 +200,7 @@ public enum Cleaner {
         md += "Free before: \(Format.bytes(r.freeBefore)) · after: \(Format.bytes(r.freeAfter))\n\n"
         md += "| Item | Size | Action | Result | Restore |\n|---|---|---|---|---|\n"
         for i in r.items {
-            md += "| \(i.title) | \(Format.bytes(i.bytes)) | \(i.action) | \(i.ok ? "✅" : "⚠️") \(i.message) | \(i.trashedTo.map { "Put back from Trash: `\($0.tildePath)` → `\(i.path.tildePath)`" } ?? "—") |\n"
+            md += "| \(i.title) | \(Format.bytes(i.bytes)) | \(i.action) | \(i.ok ? "✅" : "⚠️") \(i.message) | \(i.restored == true ? "Put back" : i.trashedTo.map { "Put back from Trash: `\($0.tildePath)` → `\(i.path.tildePath)`" } ?? "—") |\n"
         }
         try? md.write(to: dir.appendingPathComponent("receipt-\(stamp).md"), atomically: true, encoding: .utf8)
     }

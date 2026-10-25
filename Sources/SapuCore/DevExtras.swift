@@ -18,6 +18,8 @@ public enum DevExtras {
         public var lockedReason: String?
         /// Processes that lock the item while they run.
         public var whileRunning: [String] = []
+        /// Size when it isn't the folder's own (an Ollama model is its layer files, kept elsewhere).
+        public var bytes: Int64? = nil
     }
 
     static let day: TimeInterval = 86_400
@@ -35,6 +37,8 @@ public enum DevExtras {
             + pnpmStores(home: home)
             + simulatorRuntimes(json: simRuntimes(), system: system)
             + instrumentsTraces(home: home, projects: projects, now: now)
+            + orphanedClaudeChats(home: home)
+            + ollamaModels(home: home)
             + manageSeparately(home: home, system: system, userCache: userCache)
     }
 
@@ -76,6 +80,68 @@ public enum DevExtras {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
+
+    // MARK: AI chats and models
+
+    /// Claude Code keeps each project's chats in ~/.claude/projects/<encoded path>. When the project folder is gone
+    /// (deleted, renamed or moved), its chats can't be resumed from there. The project path is read from the chats
+    /// themselves; a folder whose path can't be read, or lives on an unmounted drive, is left out.
+    public static func orphanedClaudeChats(home: String) -> [Candidate] {
+        let root = home + "/.claude/projects"
+        var out: [Candidate] = []
+        for dir in DiskSizer.children(root, includeHidden: false) where DiskSizer.isDirectory(dir) && !DiskSizer.isSymlink(dir) {
+            guard let cwd = chatProject(dir), cwd.hasPrefix("/"), !cwd.hasPrefix("/Volumes/"), !FileManager.default.fileExists(atPath: cwd) else { continue }
+            out.append(Candidate(path: dir, title: "Claude Code chats: \(cwd.lastComponent) (folder gone)", category: .devCaches, safety: .check,
+                                 reason: "Chats from a project folder that no longer exists (\(cwd.tildePath)). Claude Code resumes chats by folder, so these can't be picked up from there any more.",
+                                 usedFor: "Reading or resuming those old chats.", owner: "Claude Code",
+                                 rebuild: "Not rebuilt: these are your chat history. Keep them if you moved the project and still want them.",
+                                 action: .trash))
+        }
+        return out
+    }
+
+    /// The project folder a Claude Code chat folder belongs to, from the "cwd" its chats record.
+    static func chatProject(_ dir: String) -> String? {
+        for f in DiskSizer.children(dir, includeHidden: false).filter({ $0.hasSuffix(".jsonl") }).prefix(3) {
+            guard let h = FileHandle(forReadingAtPath: f) else { continue }
+            let data = h.readData(ofLength: 256_000); try? h.close()
+            let text = String(decoding: data, as: UTF8.self)
+            if let r = text.range(of: #""cwd":"((?:[^"\\]|\\.)*)""#, options: .regularExpression) {
+                let raw = String(text[r]).dropFirst(7).dropLast()
+                return raw.replacingOccurrences(of: "\\/", with: "/").replacingOccurrences(of: "\\\\", with: "\\")
+            }
+        }
+        return nil
+    }
+
+    /// Each local Ollama model, sized by its layer files. Removed with `ollama rm`, which keeps layers other models share.
+    public static func ollamaModels(home: String) -> [Candidate] {
+        let root = home + "/.ollama/models"
+        let manifests = root + "/manifests"
+        var out: [Candidate] = []
+        let ollama = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"]
+            .first(where: FileManager.default.isExecutableFile)
+        for host in DiskSizer.children(manifests, includeHidden: false) {
+            for ns in DiskSizer.children(host, includeHidden: false) {
+                for model in DiskSizer.children(ns, includeHidden: false) {
+                    for tag in DiskSizer.children(model, includeHidden: false) where !DiskSizer.isDirectory(tag) {
+                        guard let data = FileManager.default.contents(atPath: tag),
+                              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                        let layers = (json["layers"] as? [[String: Any]] ?? []) + [json["config"] as? [String: Any] ?? [:]]
+                        let bytes = layers.compactMap { ($0["size"] as? NSNumber)?.int64Value }.reduce(0, +)
+                        let library = ns.lastComponent == "library" && host.lastComponent == "registry.ollama.ai"
+                        let name = (library ? "" : (host.lastComponent == "registry.ollama.ai" ? "" : host.lastComponent + "/") + ns.lastComponent + "/")
+                            + model.lastComponent + ":" + tag.lastComponent
+                        out.append(Candidate(path: tag, title: "Ollama model \(name)", category: .ml, safety: .yours,
+                                             reason: "A local language model you pulled with Ollama.", usedFor: "Running \(name) offline.", owner: "Ollama",
+                                             rebuild: "Pull it again with `ollama pull \(name)` if you need it later.",
+                                             action: ollama == nil ? .none : .command("\(ollama!) rm \(name)"), whileRunning: [], bytes: bytes))
+                    }
+                }
+            }
+        }
+        return out
     }
 
     // MARK: Agent worktrees
@@ -371,9 +437,10 @@ extension ScanEngine {
         let runningLower = Set(running.map { $0.lowercased() })
         return DevExtras.candidates(projects: projects).map { c in
             Job(path: c.path) { r in
-                guard r.bytes >= Self.bloatFloor else { return nil }
+                let bytes = c.bytes ?? r.bytes
+                guard bytes >= Self.bloatFloor else { return nil }
                 let open = c.whileRunning.first { runningLower.contains($0.lowercased()) }
-                return Finding(path: c.path, title: c.title, category: c.category, safety: c.safety, bytes: r.bytes, files: r.files,
+                return Finding(path: c.path, title: c.title, category: c.category, safety: c.safety, bytes: bytes, files: r.files,
                                lastModified: r.newestDate, reason: c.reason, usedFor: c.usedFor, owner: c.owner, rebuild: c.rebuild,
                                action: c.action, lockedReason: c.lockedReason ?? open.map { "\($0) is running. Quit it first." }, layer: .quick)
             }

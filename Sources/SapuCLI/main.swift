@@ -323,6 +323,62 @@ func selftest() -> Int32 {
           "disk map: folders show what Sapu can clean inside them")
     try? fm.removeItem(atPath: xh)
 
+    // v0.8: put back, startup items, AI chats and models, map safety, forgotten processes.
+    let vh = NSTemporaryDirectory() + "sapu-v08-\(UUID().uuidString)"
+    for d in [".Trash", "proj", ".claude/projects/-gone", ".claude/projects/-here", ".claude/projects/-nochats",
+              ".ollama/models/manifests/registry.ollama.ai/library/llama3", "keys/.ssh", "big"] {
+        try? fm.createDirectory(atPath: vh + "/" + d, withIntermediateDirectories: true)
+    }
+    fm.createFile(atPath: vh + "/.Trash/notes.txt", contents: Data("x".utf8))
+    let item = CleanReceipt.Item(path: vh + "/proj/notes.txt", title: "notes", bytes: 1, action: "Move to Trash", ok: true, message: "", trashedTo: vh + "/.Trash/notes.txt")
+    let back = Restorer.putBack(item, home: vh)
+    check(back.ok && fm.fileExists(atPath: vh + "/proj/notes.txt") && !fm.fileExists(atPath: vh + "/.Trash/notes.txt")
+          && !Restorer.putBack(item, home: vh).ok, "put back: an item returns from the Trash to its place; a second try is refused")
+    var outside = item; outside.trashedTo = vh + "/proj/notes.txt"; outside.path = vh + "/proj/other.txt"
+    check(!Restorer.putBack(outside, home: vh).ok, "put back: only moves things out of the Trash")
+
+    check(Startup.loadedLabels("PID\tStatus\tLabel\n-\t0\tcom.a.one\n412\t0\thomebrew.mxcl.nginx\n") == ["com.a.one", "homebrew.mxcl.nginx"]
+          && Startup.disabledLabels("\tdisabled services = {\n\t\t\"com.x.off\" => disabled\n\t\t\"com.x.on\" => enabled\n\t\t\"com.x.old\" => true\n\t}") == ["com.x.off", "com.x.old"],
+          "startup: running and turned-off items read from launchctl")
+    let brewItem = StartupItem(plist: "/x.plist", label: "homebrew.mxcl.php@8.1", program: nil, scope: .user, loaded: true, disabled: false, programMissing: false, app: nil)
+    check(Startup.brewService(brewItem) == "php@8.1" && !Startup.removeLeftover(brewItem).ok,
+          "startup: Homebrew services switch with brew services; only leftovers can be removed")
+
+    fm.createFile(atPath: vh + "/.claude/projects/-gone/a.jsonl", contents: Data(#"{"type":"user","cwd":"/nonexistent/sapu/oldproject","x":1}"#.utf8))
+    fm.createFile(atPath: vh + "/.claude/projects/-here/a.jsonl", contents: Data(#"{"cwd":"\#(vh)/proj"}"#.utf8))
+    fm.createFile(atPath: vh + "/.claude/projects/-nochats/memory.md", contents: Data("m".utf8))
+    let chats = DevExtras.orphanedClaudeChats(home: vh)
+    check(chats.count == 1 && chats[0].path.hasSuffix("-gone") && chats[0].safety == .check && chats[0].title.contains("oldproject"),
+          "ai: Claude Code chats listed only when their project folder is gone; never preselected")
+    fm.createFile(atPath: vh + "/.ollama/models/manifests/registry.ollama.ai/library/llama3/8b",
+                  contents: Data(#"{"config":{"size":500},"layers":[{"size":4000000000},{"size":12000}]}"#.utf8))
+    let om = DevExtras.ollamaModels(home: vh)
+    check(om.count == 1 && om[0].title == "Ollama model llama3:8b" && om[0].bytes == 4_000_012_500 && om[0].safety == .yours,
+          "ai: Ollama models sized by their layers, never preselected")
+
+    check(DiskExplorer.trashRefusal(vh + "/keys/.ssh", projects: [], home: vh) != nil
+          && DiskExplorer.trashRefusal(vh + "/.Trash", projects: [], home: vh) != nil
+          && DiskExplorer.trashRefusal("/usr/bin", projects: [], home: vh) != nil
+          && DiskExplorer.trashRefusal(vh + "/keys/.ssh/huge.bin", projects: [], home: vh) != nil,
+          "disk map: Move to Trash refuses private folders, the Trash and anything outside home")
+    fm.createFile(atPath: vh + "/big/movie.mov", contents: Data(count: 2_000_000))
+    fm.createFile(atPath: vh + "/keys/.ssh/huge.bin", contents: Data(count: 2_000_000))
+    let lf = DiskExplorer.largestFiles(under: vh, minBytes: 1_000_000)
+    check(lf.map { $0.path.lastComponent } == ["movie.mov"], "disk map: largest files found, private folders left out")
+
+    let stat = """
+      501     1 2-03:04:05  90000 /opt/homebrew/bin/node
+      502   500    15:00:00 50000 /opt/homebrew/bin/node
+      503     1 1-00:00:00  80000 /opt/homebrew/bin/postgres
+      504     1 3-00:00:00  60000 /usr/local/bin/gopls
+      505     1 5-00:00:00  70000 /opt/homebrew/bin/node
+    """
+    let pargs = "501 /opt/homebrew/bin/node server.js\n504 /usr/local/bin/gopls serve\n505 /opt/homebrew/bin/node agent.js\n"
+    let fp = DevProcesses.parse(stat: stat, args: pargs, launchdJobs: [505], minAge: 12 * 3600, me: 1)
+    check(Set(fp.map(\.pid)) == [501, 504] && DevProcesses.etime("2-03:04:05") == 183_845,
+          "processes: forgotten dev servers and lone language servers found; launchd jobs, databases and live ones left alone")
+    try? fm.removeItem(atPath: vh)
+
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
           "scan: cache titles read plainly, without profile IDs")
@@ -505,6 +561,18 @@ case "secrets":
         for i in ProjectSecurity.check(projectPath: path, name: path.lastComponent) {
             print("[\(i.level.rawValue)] \(path.lastComponent): \(i.title)\n    \(i.detail)\n    fix: \(i.fix)")
         }
+    }
+case "devprocs":
+    // sapu-cli devprocs [hours]   forgotten developer processes (read-only; never stops anything)
+    let hours = args.dropFirst().first.flatMap(Double.init) ?? 12
+    let found = DevProcesses.find(minAge: hours * 3600)
+    if found.isEmpty { print("No forgotten developer processes (\(Int(hours))+ hours).") }
+    for p in found { print("\(p.pid)  \(Format.bytes(p.memory).padding(toLength: 9, withPad: " ", startingAt: 0)) \(p.name): \(p.reason)\n      \(p.command.prefix(140))") }
+case "startup":
+    // sapu-cli startup   startup items and their state (read-only)
+    for i in Startup.list() {
+        let st = i.programMissing ? "LEFTOVER" : i.scope == .system ? "system" : i.disabled ? "off" : i.loaded ? "on, running" : "on, on demand"
+        print("[\(i.scope.rawValue)] \(st.padding(toLength: 15, withPad: " ", startingAt: 0)) \(i.label)\(i.app.map { "  (\($0))" } ?? "")")
     }
 case "du":
     // sapu-cli du [path] [--top n]   a folder's children, biggest first, and what Sapu can clean in each (read-only)
@@ -741,5 +809,5 @@ case "maintenance":
         if case .terminal(let c) = t.fix { print("    $ \(c)") }
     }
 default:
-    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | du [path] [--top n] | selftest")
+    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | du [path] [--top n] | startup | devprocs [hours] | selftest")
 }
