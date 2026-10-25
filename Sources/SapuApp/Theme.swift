@@ -34,7 +34,7 @@ extension Pane {
         case .apps: "Installed apps, when you last used them, and data left behind by apps you removed."
         case .files: "Big single files and Downloads untouched for 6+ months. Never pre-selected."
         case .projects: "Every repo on this Mac. Projects you're working on are locked."
-        case .map: "Every home and Library folder, so nothing is hidden. Measured only."
+        case .map: "Every folder in your home, biggest first. Open any folder to see what fills it. Measured only."
         case .uninstall: "Remove an app with everything it left in your Library. Caches go; your data stays unless you choose."
         case .health: "Memory, swap, processor, disk, battery and heat, and what is using them."
         case .maintenance: "Small fixes macOS doesn't do by itself: broken login items, damaged settings, stale caches."

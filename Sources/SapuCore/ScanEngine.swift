@@ -803,10 +803,10 @@ public final class ScanEngine: @unchecked Sendable {
     }
 }
 
-final class Locked<T>: @unchecked Sendable {
+public final class Locked<T>: @unchecked Sendable {
     private var v: T
     private let l = NSLock()
-    init(_ v: T) { self.v = v }
-    var value: T { l.lock(); defer { l.unlock() }; return v }
-    func mutate(_ f: (inout T) -> Void) { l.lock(); f(&v); l.unlock() }
+    public init(_ v: T) { self.v = v }
+    public var value: T { l.lock(); defer { l.unlock() }; return v }
+    public func mutate(_ f: (inout T) -> Void) { l.lock(); f(&v); l.unlock() }
 }
