@@ -121,23 +121,27 @@ public enum RuleBook {
              rebuild: "Re-indexed on open.", action: .trash, whileRunning: ["idea", "pycharm", "webstorm", "phpstorm", "goland", "studio"]),
 
         // MARK: ML
-        Rule(id: "hf.cache", title: "Hugging Face models", category: .ml, paths: ["~/.cache/huggingface"], safety: .check,
-             reason: "Model weights and datasets downloaded by transformers/datasets — often GBs per model.", usedFor: "Loading models offline.", owner: "Hugging Face",
-             rebuild: "Re-downloaded on next from_pretrained (slow for big models).", action: .trash),
-        Rule(id: "torch.hub", title: "PyTorch hub cache", category: .ml, paths: ["~/.cache/torch"], safety: .check,
+        // Models are yours: shown with their size, never cleaned. Remove them with the tool that manages them.
+        Rule(id: "hf.cache", title: "Hugging Face models", category: .ml, paths: ["~/.cache/huggingface"], safety: .yours,
+             reason: "Model weights and datasets downloaded by transformers/datasets, often GBs per model.", usedFor: "Loading models offline.", owner: "Hugging Face",
+             rebuild: "Sapu doesn't remove models. Pick the ones you no longer use with `huggingface-cli delete-cache`.", action: .none),
+        Rule(id: "torch.hub", title: "PyTorch hub models", category: .ml, paths: ["~/.cache/torch"], safety: .yours,
              reason: "Pretrained weights fetched by torch.hub/torchvision.", usedFor: "Loading pretrained models.", owner: "PyTorch",
-             rebuild: "Re-downloaded on demand.", action: .trash),
+             rebuild: "Sapu doesn't remove models. Delete the checkpoints you no longer use from this folder in Finder.", action: .none),
         Rule(id: "ollama", title: "Ollama models", category: .ml, paths: ["~/.ollama/models"], safety: .yours,
              reason: "Local LLM weights pulled with ollama pull.", usedFor: "Running local models.", owner: "Ollama",
-             rebuild: "ollama pull <model>", action: .command("ollama rm <model>")),
+             rebuild: "Sapu doesn't remove models. List them with `ollama list` and remove one with `ollama rm <name>`.", action: .none),
 
         // MARK: Containers & VMs
-        Rule(id: "docker.desktop", title: "Docker Desktop disk", category: .containers, paths: ["~/Library/Containers/com.docker.docker"], safety: .check,
+        // A prune also deletes stopped containers and whatever was stored inside them, so it is yours to run.
+        Rule(id: "docker.desktop", title: "Docker Desktop disk", category: .containers, paths: ["~/Library/Containers/com.docker.docker"], safety: .yours,
              reason: "One virtual disk holding every image, container, build cache and volume. It grows and does not shrink by itself.", usedFor: "Docker containers.", owner: "Docker Desktop",
-             rebuild: "Prune keeps volumes (your databases). Images are re-pulled.", action: .command("docker system prune -f"), whileRunning: ["com.docker.backend"]),
-        Rule(id: "colima", title: "Colima VM", category: .containers, paths: ["~/.colima", "~/.lima"], safety: .check,
+             rebuild: "Not cleaned by Sapu: `docker system prune` keeps volumes but deletes stopped containers and files kept inside them. Run it yourself once you know none of them matter.",
+             action: .none, whileRunning: ["com.docker.backend"]),
+        Rule(id: "colima", title: "Colima VM", category: .containers, paths: ["~/.colima", "~/.lima"], safety: .yours,
              reason: "Linux VM disk used by Colima/Lima for Docker.", usedFor: "Docker without Docker Desktop.", owner: "Colima",
-             rebuild: "Prune inside the VM keeps volumes.", action: .command("docker system prune -f"), whileRunning: ["limactl"]),
+             rebuild: "Not cleaned by Sapu: `docker system prune` inside the VM keeps volumes but deletes stopped containers and files kept inside them. Run it yourself once you know none of them matter.",
+             action: .none, whileRunning: ["limactl"]),
         Rule(id: "android.avd", title: "Android emulators", category: .containers, paths: ["~/.android/avd"], safety: .check,
              reason: "Disk images of every Android Virtual Device.", usedFor: "Android emulator.", owner: "Android Studio",
              rebuild: "Recreate in Device Manager.", action: .trash, whileRunning: ["qemu-system-aarch64"]),
