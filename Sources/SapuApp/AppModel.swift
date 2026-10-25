@@ -97,6 +97,7 @@ final class AppModel: ObservableObject {
     @Published var runningTask: String?
 
     let engine = ScanEngine()
+    let explorer = ExplorerModel()
     @Published var hasFullDiskAccess = SystemProbe.hasFullDiskAccess
     @Published var showAccessSetup = false
     /// Folders the last layer took from the cache because the change journal showed no change.

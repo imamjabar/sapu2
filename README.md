@@ -97,6 +97,11 @@ After each projects scan, Sapu checks every project on this Mac (nothing is sent
 
 Secrets are shown masked (first 8 characters and the length), each with the exact fix. Try it from the terminal with `sapu-cli secrets <project…>`. The per-project dependency audit now runs npm, pnpm and composer audits, plus `cargo-audit`, `pip-audit` and `osv-scanner` when installed.
 
+### Disk map
+- **Browse your home folder, biggest first:** open any folder and see what fills it. Sizes appear as each folder is measured, three at a time in the background so the Mac stays responsive, and going back is instant.
+- **Linked to the cleaner:** an item Sapu already knows shows its badge (Safe, Check first, Your files) and opens its details; a folder shows how much inside it Sapu can clean.
+- **Private by design:** links are never followed. Keychains, `~/.ssh`, `~/.gnupg`, mail, messages, password managers, photo libraries and cloud folders are measured but never listed. Nothing is deleted from the map.
+
 ### Health and Maintenance
 
 - **Health:**
@@ -149,6 +154,7 @@ The app bundle includes `sapu-cli`, which uses the same engine and shares the sa
 /Applications/Sapu.app/Contents/Resources/sapu-cli scan quick      # or: projects | full | all
 /Applications/Sapu.app/Contents/Resources/sapu-cli report
 /Applications/Sapu.app/Contents/Resources/sapu-cli versions
+/Applications/Sapu.app/Contents/Resources/sapu-cli du ~/Library       # a folder's children, biggest first
 /Applications/Sapu.app/Contents/Resources/sapu-cli selftest
 ```
 

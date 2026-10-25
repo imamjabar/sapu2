@@ -305,6 +305,24 @@ func selftest() -> Int32 {
           "dev: clang module cache shown with how to remove it, never cleaned (outside home)")
     check(RuleBook.all.contains { $0.paths == ["~/.npm/_prebuilds"] && $0.safety == .safe }, "dev: npm prebuilt binaries are a safe cache")
 
+    // Disk map: a fake home with a folder, a file, a link, an app package and key stores.
+    let xh = NSTemporaryDirectory() + "sapu-explore-\(UUID().uuidString)"
+    for d in ["Code/big", "Mine.app/Contents", ".ssh", "Library/Keychains", "Library/Mail/V10"] { try? fm.createDirectory(atPath: xh + "/" + d, withIntermediateDirectories: true) }
+    fm.createFile(atPath: xh + "/Code/big/a.bin", contents: Data(count: 300_000))
+    fm.createFile(atPath: xh + "/notes.txt", contents: Data(count: 10))
+    try? fm.createSymbolicLink(atPath: xh + "/elsewhere", withDestinationPath: "/usr")
+    let xe = Dictionary(uniqueKeysWithValues: DiskExplorer.entries(in: xh).map { ($0.name, $0) })
+    check(xe["Code"]?.isFolder == true && xe["Mine.app"]?.isFolder == false && xe["elsewhere"]?.isLink == true && xe["elsewhere"]?.isFolder == false
+          && xe["notes.txt"]?.isFolder == false, "disk map: folders open, packages stay one item, links are never followed")
+    check(DiskExplorer.sealed(xh + "/.ssh", home: xh) != nil && DiskExplorer.sealed(xh + "/Library/Keychains", home: xh) != nil
+          && DiskExplorer.sealed(xh + "/Library/Mail", home: xh) != nil && DiskExplorer.sealed(xh + "/Code", home: xh) == nil,
+          "disk map: keys, keychains and mail are measured but never listed")
+    let xf = [Finding(path: xh + "/Code/big", title: "x", category: .projects, safety: .safe, bytes: 300_000, files: 1, lastModified: nil,
+                      reason: "", usedFor: "", owner: "", rebuild: nil, action: .trash, layer: .projects)]
+    check(DiskExplorer.cleanable(under: xh + "/Code", in: xf) == 300_000 && DiskExplorer.cleanable(under: xh + "/Library", in: xf) == 0,
+          "disk map: folders show what Sapu can clean inside them")
+    try? fm.removeItem(atPath: xh)
+
     check(ScanEngine.friendlyCache("Partitions/81df339d-9913-4d99-88d8-4005c1b203c9/Cache") == "web cache"
           && ScanEngine.friendlyCache("User Data/Profile 1/Service Worker/CacheStorage") == "offline web cache (Profile 1)",
           "scan: cache titles read plainly, without profile IDs")
@@ -487,6 +505,24 @@ case "secrets":
         for i in ProjectSecurity.check(projectPath: path, name: path.lastComponent) {
             print("[\(i.level.rawValue)] \(path.lastComponent): \(i.title)\n    \(i.detail)\n    fix: \(i.fix)")
         }
+    }
+case "du":
+    // sapu-cli du [path] [--top n]   a folder's children, biggest first, and what Sapu can clean in each (read-only)
+    let dir = (args.dropFirst().first { !$0.hasPrefix("--") }.map { ($0 as NSString).standardizingPath.expandingTilde }) ?? NSHomeDirectory()
+    let top = args.firstIndex(of: "--top").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 30
+    let entries = DiskExplorer.entries(in: dir)
+    let sizes = Locked([Int64](repeating: 0, count: entries.count))
+    DispatchQueue.concurrentPerform(iterations: entries.count) { i in
+        let b = DiskSizer.size(entries[i].path).bytes
+        sizes.mutate { $0[i] = b }
+    }
+    let findings = Store.load()?.findings ?? []
+    let ranked = entries.indices.sorted { sizes.value[$0] > sizes.value[$1] }
+    print("\(dir.tildePath)  \(Format.bytes(sizes.value.reduce(0, +))) in \(entries.count) items")
+    for i in ranked.prefix(top) {
+        let e = entries[i], c = DiskExplorer.cleanable(under: e.path, in: findings)
+        let mark = e.sealed != nil ? "  (not listed: private)" : e.isLink ? "  (link, not followed)" : c > 0 ? "  · \(Format.bytes(c)) cleanable" : ""
+        print("  \(Format.bytes(sizes.value[i]).padding(toLength: 10, withPad: " ", startingAt: 0)) \(e.name)\(e.isFolder ? "/" : "")\(mark)")
     }
 case "creds":
     // sapu-cli creds <path…>   what sign-ins or keys Sapu sees inside each path (read-only)
@@ -705,5 +741,5 @@ case "maintenance":
         if case .terminal(let c) = t.fix { print("    $ \(c)") }
     }
 default:
-    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | selftest")
+    print("usage: sapu-cli scan [quick|projects|full|all] | report | versions [--offline] | apps [name…] | du [path] [--top n] | selftest")
 }

@@ -11,7 +11,7 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 if !model.hasFullDiskAccess { FullDiskAccessBanner() }
-                if ![.overview, .uninstall, .health, .maintenance].contains(model.section) || model.scanning != nil {
+                if ![.overview, .uninstall, .health, .maintenance, .map].contains(model.section) || model.scanning != nil {
                     ScanBar()
                     Divider()
                 }
@@ -64,6 +64,7 @@ struct ContentView: View {
         case .health: HealthView()
         case .maintenance: MaintenanceView()
         case .receipts: ReceiptsView()
+        case .map: DiskMapView(ex: model.explorer)
         default: FindingsList(section: model.section)
         }
     }
