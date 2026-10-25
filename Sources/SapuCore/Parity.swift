@@ -1,8 +1,8 @@
 import Foundation
 
-/// The release check's memory of one Mac: every answer the leftover finder got from the disk, the reference's
+/// The release check's memory of one Mac: every answer the leftover finder got from the disk, the reference tool's
 /// leftovers for each app, and the hand review of every path. Replaying it re-runs the finder on that
-/// Mac without the Mac, so a later change that claims a new path, loses one of the reference's, or lets two apps
+/// Mac without the Mac, so a later change that claims a new path, loses one of the reference tool's, or lets two apps
 /// claim the same path fails `sapu-cli selftest`.
 public struct ParityFixture: Codable, Sendable {
     public struct App: Codable, Sendable {
@@ -36,9 +36,9 @@ public struct ParityFixture: Codable, Sendable {
     public var referenceVersion: String
     public var apps: [App]
     public var disk: Disk
-    /// the reference's leftovers per app name.
+    /// The reference tool's leftovers per app name.
     public var reference: [String: [String]]
-    /// Paths reference claims that Sapu deliberately leaves, with the reason. Keyed by app name, then path.
+    /// Paths the reference tool claims that Sapu deliberately leaves, with the reason. Keyed by app name, then path.
     public var referenceMistakes: [String: [String: String]]
     /// Every path Sapu claims, reviewed by hand once: app name → path → why it belongs to that app.
     public var reviewed: [String: [String: String]]
@@ -107,7 +107,7 @@ public struct ParityFixture: Codable, Sendable {
         }
         for a in apps {
             let mine = (found[a.name] ?? []).map(ParityFixture.tilde)
-            // 1. Everything reference finds, Sapu finds, or it is a written-down reference mistake.
+            // 1. Everything the reference finds, Sapu finds, or it is a written-down reference mistake.
             for p in reference[a.name] ?? [] where !covered(p, by: mine) && referenceMistakes[a.name]?[p] == nil {
                 out.append("\(a.name): reference finds \(p), Sapu doesn't, and it isn't on the reference-mistakes list")
             }
@@ -140,8 +140,8 @@ extension Uninstaller {
     }
 }
 
-/// the reference's tested apps (the 851 on its compatibility list that Homebrew documents), all installed side by side in a
-/// home folder holding exactly their documented leftovers, and what the reference's finder claimed there. Replayed by
+/// The reference tool's tested apps (those on its compatibility list that Homebrew documents), all installed side by side in a
+/// home folder holding exactly their documented leftovers, and what the reference finder claimed there. Replayed by
 /// `sapu-cli selftest`: Sapu must find every reference path (bar written-down reference mistakes) and no path may go to two apps.
 public struct TestedFixture: Codable, Sendable {
     public struct App: Codable, Sendable {
