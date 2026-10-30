@@ -643,6 +643,8 @@ func selftest() -> Int32 {
                 lockedReason: lock, layer: layer)
     }
     check(CleanGroup.of(finding("/Applications/Figma.app", .apps, .check)) == .unusedApps, "an unused app is in Unused apps, not System cache")
+    check(CleanGroup.of(finding(NSHomeDirectory() + "/Library/Containers/com.example.Gone", .apps, .check)) != .unusedApps,
+          "the leftover of a removed app is not an unused app")
     check(CleanGroup.of(finding("/Library/Application Support/com.apple.idleassetsd/Customer", .system)) == .systemCache, "a macOS cache outside home stays System cache")
 
     // Sweep plan: the bins follow the safety label, and locked, protected and full-map totals stay out.

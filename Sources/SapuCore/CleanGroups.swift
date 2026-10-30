@@ -53,7 +53,8 @@ public enum CleanGroup: String, CaseIterable, Sendable {
         if browserWords.contains(where: p.contains) { return .browser }
         if f.category == .logs { return .logs }
         // Apps live outside the home folder, so without this line they would fall into "System cache" below.
-        if f.category == .apps { return .unusedApps }
+        // Only a real app bundle: the leftovers of an app that is already gone are not "unused apps".
+        if f.category == .apps, f.path.hasSuffix(".app") { return .unusedApps }
         if [.devCaches, .xcode, .ml, .containers, .projects].contains(f.category) { return .developer }
         if p.contains("/library/caches/com.apple.") || p.contains("/library/containers/com.apple.") || !f.path.hasPrefix(home + "/") { return .systemCache }
         if f.category == .appCaches { return .appCache }

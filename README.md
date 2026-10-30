@@ -147,7 +147,7 @@ scripts/           build, package (DMG), signing
 
 ## Status
 
-This is the first public release, **v0.1.0**.
+Sapu2 is in its first public releases (v0.1.x).
 
 - Apple Silicon and macOS 14 or later. English only.
 - Signed with its own certificate, not yet notarized by Apple.
