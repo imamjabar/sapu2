@@ -1,0 +1,7 @@
+build/
+.build/
+.swiftpm/
+*.dmg
+.DS_Store
+.impeccable/
+scripts/.reference

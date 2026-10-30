@@ -1,0 +1,264 @@
+import Darwin
+import Foundation
+
+public struct CleanReceipt: Codable, Sendable, Identifiable {
+    public struct Item: Codable, Sendable, Hashable {
+        public var path: String
+        public var title: String
+        public var bytes: Int64
+        public var action: String
+        public var ok: Bool
+        public var message: String
+        /// Where the item went in the Trash, for restoring.
+        public var trashedTo: String?
+        /// Put back from the Trash to where it was.
+        public var restored: Bool? = nil
+
+        public init(path: String, title: String, bytes: Int64, action: String, ok: Bool, message: String, trashedTo: String?, restored: Bool? = nil) {
+            self.path = path; self.title = title; self.bytes = bytes; self.action = action; self.ok = ok; self.message = message
+            self.trashedTo = trashedTo; self.restored = restored
+        }
+    }
+    public var id: String { date.ISO8601Format() }
+    public var date: Date
+    public var items: [Item]
+    public var freeBefore: Int64
+    public var freeAfter: Int64
+
+    public var cleanedBytes: Int64 { items.filter(\.ok).reduce(0) { $0 + $1.bytes } }
+
+    public init(date: Date, items: [Item], freeBefore: Int64, freeAfter: Int64) {
+        self.date = date; self.items = items; self.freeBefore = freeBefore; self.freeAfter = freeAfter
+    }
+}
+
+/// Last line of defence. Every path is checked here right before it is touched, whatever the UI allowed.
+public enum SafetyGuard {
+    static let home = NSHomeDirectory()
+
+    static let protectedFragments = [
+        "/Library/Keychains", "/Library/Mobile Documents", "/Library/CloudStorage", "/Library/Mail", "/Library/Messages",
+        "/Library/Application Support/MobileSync", "/Library/Photos", "/Library/Safari",
+        "/Library/Accounts", "/Library/Calendars", "/Library/Group Containers/group.com.apple",
+        "/.ssh", "/.gnupg", "/.aws", "/.sapu-signing", "/.config/gcloud", "/.kube", "/.docker/config.json",
+        ".photoslibrary", "/Library/Application Support/1Password", "/Library/Application Support/Bitwarden",
+    ]
+    static let secretSuffixes = [".pem", ".key", ".p12", ".keystore", ".jks", ".kdbx"]
+    static let homeTopLevel: Set<String> = ["Desktop", "Documents", "Downloads", "Library", "Movies", "Music", "Pictures", "Public", "Applications"]
+    static let allowedRoots = [home + "/", "/Applications/", "/opt/homebrew/var/log/"]
+
+    /// nil when the path may be cleaned, otherwise the reason it may not.
+    public static func refusal(for f: Finding, allowActiveProjects: Bool) -> String? {
+        let p = (f.path as NSString).standardizingPath
+        if f.safety == .protected { return "Protected item." }
+        if f.action == .none { return "Information only." }
+        if let lock = f.lockedReason, !(allowActiveProjects && lock.hasPrefix("Active project")) { return lock }
+        guard allowedRoots.contains(where: p.hasPrefix) else { return "Outside the folders Sapu2 may change." }
+        if protectedFragments.contains(where: p.contains) { return "Protected location." }
+        if let why = Protection.dataOnly(p) { return why }
+        if ProtectList.entry(covering: p, in: ProtectList.load()) != nil { return ProtectList.message }
+        // One app's cookie file goes with that app; the Cookies folder and Apple's own stay.
+        if p.contains("/Library/Cookies"), !(p.parentPath == home + "/Library/Cookies" && p.hasSuffix(".binarycookies")
+                                              && !p.lastComponent.hasPrefix("com.apple.")) { return "Protected location." }
+        let name = p.lastComponent
+        if name.hasPrefix(".env") || secretSuffixes.contains(where: name.hasSuffix) { return "Looks like secrets." }
+        if p == home || p.parentPath == home && homeTopLevel.contains(name) { return "Never removes a home folder itself." }
+        if p == home + "/Library" || p.parentPath == home + "/Library" { return "Never removes a top-level Library folder." }
+        if DiskSizer.isSymlink(p) { return "Symlink; Sapu2 never follows or removes links." }
+        if !DiskSizer.exists(p) { return "Already gone." }
+        return nil
+    }
+}
+
+/// Puts a cleaned item back where it was, from the Trash.
+public enum Restorer {
+    /// Moves `trashedTo` back to `path`. Refuses when the item has left the Trash or something new is at its old place.
+    public static func putBack(_ item: CleanReceipt.Item, home: String = NSHomeDirectory()) -> (ok: Bool, message: String) {
+        guard let from = item.trashedTo, item.ok else { return (false, "This item didn't go to the Trash.") }
+        guard item.restored != true else { return (false, "Already put back.") }
+        guard from.hasPrefix(home + "/.Trash/") || from.contains("/.Trashes/") else { return (false, "Not in the Trash.") }
+        guard DiskSizer.exists(from) else { return (false, "No longer in the Trash (it was emptied or moved).") }
+        guard !DiskSizer.exists(item.path) else { return (false, "Something is already at \(item.path.tildePath). Put it back by hand from the Trash.") }
+        do {
+            try FileManager.default.createDirectory(atPath: item.path.parentPath, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(atPath: from, toPath: item.path)
+            return (true, "Put back to \(item.path.tildePath).")
+        } catch {
+            return (false, "Couldn't put it back: \(error.localizedDescription)")
+        }
+    }
+
+    /// Puts one receipt item back and records it in the receipt.
+    public static func putBack(_ receipt: CleanReceipt, item index: Int) -> (receipt: CleanReceipt, ok: Bool, message: String) {
+        guard receipt.items.indices.contains(index) else { return (receipt, false, "No such item.") }
+        let r = putBack(receipt.items[index])
+        var updated = receipt
+        if r.ok {
+            updated.items[index].restored = true
+            Cleaner.save(updated)
+        }
+        return (updated, r.ok, r.message)
+    }
+
+    /// Whether the item went to the Trash and has not been put back yet.
+    public static func canPutBack(_ item: CleanReceipt.Item) -> Bool { item.ok && item.trashedTo != nil && item.restored != true }
+
+    /// Puts back every item of a sweep that is still in the Trash, then saves the receipt once.
+    /// Items that were emptied from the Trash, or whose old place is taken, stay as they are and are counted in `failed`.
+    public static func putBackAll(_ receipt: CleanReceipt, home: String = NSHomeDirectory()) -> (receipt: CleanReceipt, restored: Int, failed: Int) {
+        var updated = receipt, restored = 0, failed = 0
+        for i in updated.items.indices where canPutBack(updated.items[i]) {
+            if putBack(updated.items[i], home: home).ok { updated.items[i].restored = true; restored += 1 } else { failed += 1 }
+        }
+        if restored > 0 { Cleaner.save(updated) }
+        return (updated, restored, failed)
+    }
+}
+
+public enum Cleaner {
+    public static func clean(_ findings: [Finding], allowActiveProjects: Bool,
+                             progress: (Int, String) -> Void = { _, _ in }) -> CleanReceipt {
+        let before = SystemProbe.volume().free
+        var items: [CleanReceipt.Item] = []
+        var ranCommands = Set<String>()
+        for (i, f) in findings.enumerated() {
+            progress(i, f.title)
+            var item = CleanReceipt.Item(path: f.path, title: f.title, bytes: f.bytes, action: f.action.label, ok: false, message: "", trashedTo: nil)
+            if let why = SafetyGuard.refusal(for: f, allowActiveProjects: allowActiveProjects) {
+                item.message = "Skipped: \(why)"
+                items.append(item); continue
+            }
+            // Leftovers of removed apps (containers, web data) can still hold sign-ins or keys: those stay.
+            if let why = credentialRefusal(f) {
+                item.message = "Skipped: \(why)"
+                items.append(item); continue
+            }
+            switch f.action {
+            case .trash where f.category == .logs:
+                (item.ok, item.message) = splitLogs(f.path)
+            case .trash:
+                (item.ok, item.message, item.trashedTo) = trash(f.path)
+            case .freezeThenTrash:
+                let freeze = freezeVenv(f.path)
+                (item.ok, item.message, item.trashedTo) = trash(f.path)
+                item.message = freeze + " " + item.message
+            case .command(let cmd):
+                if ranCommands.contains(cmd) { item.ok = true; item.message = "Covered by the same command above."; break }
+                ranCommands.insert(cmd)
+                let r = Shell.run(Shell.split(cmd), cwd: NSHomeDirectory(), timeout: 900)
+                item.ok = r.status == 0
+                item.message = r.status == 0 ? "Ran \(cmd)" : "\(cmd) failed (\(r.status)): \((r.err + r.out).suffix(300))"
+            case .truncateLogs:
+                (item.ok, item.message) = truncateLogs(f.path)
+            case .none:
+                item.message = "Info only."
+            }
+            // A refusal is the guard doing its job; a failure after the guard passed is worth keeping for a bug report.
+            if !item.ok { ErrorLog.record("clean", "\(f.title) (\(f.path)): \(item.message)") }
+            items.append(item)
+        }
+        let receipt = CleanReceipt(date: Date(), items: items, freeBefore: before, freeAfter: SystemProbe.volume().free)
+        save(receipt)
+        return receipt
+    }
+
+    /// Leftovers of removed apps (containers, web data) can still hold sign-ins or keys: those stay.
+    public static func credentialRefusal(_ f: Finding) -> String? {
+        guard f.category == .apps, f.action == .trash, let c = Credentials.find(in: f.path, limit: 1, failSafe: false).first else { return nil }
+        return "holds sign-ins or keys (\(c.lastComponent))."
+    }
+
+    public static func trash(_ path: String) -> (Bool, String, String?) {
+        var result: NSURL?
+        do {
+            // Tests set this so what they throw away lands in their own temporary folder, not your Trash.
+            if let bin = ProcessInfo.processInfo.environment["SAPU_TEST_TRASH"], !bin.isEmpty {
+                try FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
+                let dest = bin + "/" + UUID().uuidString + "-" + path.lastComponent
+                try FileManager.default.moveItem(atPath: path, toPath: dest)
+                return (true, "Moved to Trash.", dest)
+            }
+            try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &result)
+            return (true, "Moved to Trash.", result?.path)
+        } catch {
+            return (false, "Could not move to Trash: \(error.localizedDescription)", nil)
+        }
+    }
+
+    /// Save installed packages next to the project before a venv goes away.
+    static func freezeVenv(_ venv: String) -> String {
+        let py = venv + "/bin/python"
+        guard FileManager.default.isExecutableFile(atPath: py) else { return "No python in venv; nothing frozen." }
+        let r = Shell.run([py, "-m", "pip", "freeze"], timeout: 60)
+        guard r.status == 0, !r.out.isEmpty else { return "pip freeze failed; venv still trashed (restorable)." }
+        let day = Date().ISO8601Format(.iso8601.year().month().day())
+        let out = venv.parentPath + "/requirements-freeze-\(day).txt"
+        do {
+            try r.out.write(toFile: out, atomically: true, encoding: .utf8)
+            return "Saved \(out.lastComponent)."
+        } catch { return "Could not write \(out.lastComponent)." }
+    }
+
+    /// Logs: files untouched for a week go to the Trash; big ones still being written are emptied in place, so the app
+    /// keeps logging; small recent ones stay. The folder itself stays.
+    public static func splitLogs(_ path: String, now: Date = Date(), staleAfter: TimeInterval = 7 * 86_400,
+                                 bigActive: Int64 = 10_000_000, remove: (String) -> Bool = { trash($0).0 }) -> (Bool, String) {
+        var files: [String] = []
+        if DiskSizer.isDirectory(path) {
+            let e = FileManager.default.enumerator(atPath: path)
+            while let rel = e?.nextObject() as? String {
+                let p = path + "/" + rel
+                if DiskSizer.isSymlink(p) { e?.skipDescendants(); continue }
+                if !DiskSizer.isDirectory(p) { files.append(p) }
+            }
+        } else { files = [path] }
+        var trashed = 0, emptied = 0, kept = 0, failed = 0
+        for f in files {
+            let age = now.timeIntervalSince(DiskSizer.mtime(f) ?? now)
+            if age >= staleAfter {
+                if remove(f) { trashed += 1 } else { failed += 1 }
+            } else if DiskSizer.size(f).bytes >= bigActive {
+                if truncate(f, 0) == 0 { emptied += 1 } else { failed += 1 }
+            } else { kept += 1 }
+        }
+        return (failed == 0, "\(trashed) old log file(s) to the Trash, \(emptied) large active log(s) emptied in place, \(kept) recent kept."
+                + (failed > 0 ? " \(failed) couldn't be changed." : ""))
+    }
+
+    /// Empty `*.log` files in place (a file, or files up to two levels inside a folder).
+    public static func truncateLogs(_ path: String) -> (Bool, String) {
+        var files: [String] = []
+        if DiskSizer.isDirectory(path) {
+            for c in DiskSizer.children(path) {
+                if DiskSizer.isDirectory(c) { files += DiskSizer.children(c).filter(isLog) } else if isLog(c) { files.append(c) }
+            }
+        } else if isLog(path) || path.contains("/var/log/") || path.contains("/logs/") {
+            files = [path]
+        }
+        files = files.filter { !DiskSizer.isSymlink($0) }
+        guard !files.isEmpty else { return (false, "No log files found.") }
+        var failed = 0
+        for f in files where truncate(f, 0) != 0 { failed += 1 }
+        return (failed == 0, failed == 0 ? "Emptied \(files.count) log file(s)." : "\(failed) of \(files.count) could not be emptied (permission).")
+    }
+
+    static func isLog(_ p: String) -> Bool {
+        let n = p.lastComponent
+        return n.hasSuffix(".log") || n.contains(".log.") || n.hasSuffix("_log") || n.hasSuffix(".err")
+    }
+
+    public static func save(_ r: CleanReceipt) {
+        let dir = Store.receiptsDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = r.date.ISO8601Format().replacingOccurrences(of: ":", with: "-")
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601; enc.outputFormatting = .prettyPrinted
+        try? enc.encode(r).write(to: dir.appendingPathComponent("receipt-\(stamp).json"))
+        var md = "# Sapu2 cleanup receipt — \(r.date.formatted())\n\n"
+        md += "Free before: \(Format.bytes(r.freeBefore)) · after: \(Format.bytes(r.freeAfter))\n\n"
+        md += "| Item | Size | Action | Result | Restore |\n|---|---|---|---|---|\n"
+        for i in r.items {
+            md += "| \(i.title) | \(Format.bytes(i.bytes)) | \(i.action) | \(i.ok ? "✅" : "⚠️") \(i.message) | \(i.restored == true ? "Put back" : i.trashedTo.map { "Put back from Trash: `\($0.tildePath)` → `\(i.path.tildePath)`" } ?? "—") |\n"
+        }
+        try? md.write(to: dir.appendingPathComponent("receipt-\(stamp).md"), atomically: true, encoding: .utf8)
+    }
+}

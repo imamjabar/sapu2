@@ -1,0 +1,17 @@
+name: Weekly check
+# Catches drift nobody pushed: a new macOS runner image, a new Xcode toolchain, or support data that changed.
+# The live rerun of the reference cleaner needs it installed next to real apps, so it stays on a Mac:
+# see scripts/weekly-check.sh.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: scripts/build.sh release
+      - name: Self-test
+        run: build/sapu2-cli selftest
